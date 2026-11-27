@@ -14,6 +14,28 @@ töltsd fel a havi körfuvar-fájlokat (`korfuvarok_ÉÉÉÉ_HH.xlsx`) és a hav
 formátum: `config/flotta_minta.csv`). Helyi futtatásnál a fájlok a `data/`, illetve a `config/` mappába is
 tehetők; ezeket a `.gitignore` kizárja a repóból.
 
+## Belépés (Bábolna Sped portál)
+
+Az app csak Google-belépés után, a portál jogosultságtáblájában engedélyezett fiókkal nyílik meg
+(app kulcs: `korfuvar`). A felső sáv „Alkalmazások” menüje a portálra és a felhasználó többi appjára visz.
+A közös `bsp_guard.py` a `bsp-portal` repóból származik. Szükséges Secrets (a repóba soha):
+
+```toml
+[auth]
+redirect_uri = "https://<EZ-AZ-APP>.streamlit.app/oauth2callback"
+cookie_secret = "..."
+client_id = "..."
+client_secret = "..."
+server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
+
+[portal]
+sheet_id = "..."
+admin_emails = ["..."]
+portal_url = "https://bsp-app.streamlit.app"
+```
+
+A `[gcp_service_account]` blokk (lásd lent) a jogosultságtábla olvasásához is kell.
+
 ## Létszám a Google-táblázatból
 
 Az app automatikusan beolvassa a havi autó- és sofőrlétszámot az „Éves fajlagos fuvarozási mutatók”

@@ -13,6 +13,7 @@ import streamlit as st
 
 from korfuvar import data as kd
 from korfuvar import sheets
+from bsp_guard import apps_menu_html, require_access
 
 ROOT = Path(__file__).parent
 NAVY, YELLOW, BG, BORDER, MUTED = "#2A3756", "#F2E47D", "#F4F5F8", "#E3E6EC", "#5B6475"
@@ -79,7 +80,7 @@ def brand():
     </style>""", unsafe_allow_html=True)
     st.markdown(f"""<div class="topbar"><div class="topbar-in">
       <img src="data:image/png;base64,{asset64('logo_ui.png')}" alt="Bábolna Sped">
-      <div class="crumb"><span class="apps">Alkalmazások</span><span class="sep">/</span>
+      <div class="crumb">{apps_menu_html('korfuvar')}<span class="sep">/</span>
       <span class="cur">Körfuvar-elemzés</span></div></div></div>""", unsafe_allow_html=True)
 
 
@@ -138,6 +139,7 @@ def betolt_naplo(files: tuple[tuple[str, bytes], ...]) -> pd.DataFrame | None:
 
 
 brand()
+USER = require_access("korfuvar")  # Google-belépés + jogosultság a portál táblájából
 st.markdown('<div class="pagehead"><h1>Körfuvar-elemzés</h1>'
             '<p>Visszatérő viszonylatok eredménye EUR/km-ben, tényleges és teljes sofőrállományú szcenárióval</p></div>',
             unsafe_allow_html=True)
