@@ -428,29 +428,117 @@ def trend(df: pd.DataFrame) -> pd.DataFrame:
     return osszesit(df, ["Viszonylat", "Hónap"])
 
 
-def vallalkozoi(b: pd.DataFrame, tobblet_kor: float = 50.0, piaci_ar_km: float | None = None) -> pd.DataFrame:
-    """Kiadás alvállalkozónak a szerződéses (kiutalt) fuvaroknál.
+EXPORT_TIPUSOK = {"Export", "Nemzetközi áruszállítás (exportőr részére)"}
+
+
+def read_fuvarnaplo(src, nev: str | None = None) -> pd.DataFrame:
+    """InnoTMS „Fuvarnapló” export (logbooks_list): fuvarszám, típus, vállalási díj.
+
+    A részfeladatok (15750-1, 15750-2 …) ugyanazt a fuvardíjat ismétlik, ezért fuvaronként
+    (a kötőjel előtti szám) egyszer számít.
+    """
+    if isinstance(src, (bytes, bytearray)):
+        src = io.BytesIO(src)
+    df = pd.read_excel(src)
+    if "Fuvarszám" not in df or "Fuvarfeladat típusa" not in df:
+        raise ValueError("Ez nem Fuvarnapló-export (hiányzik a Fuvarszám vagy a Fuvarfeladat típusa oszlop).")
+    dij, pnem = "Pontosított vállalási díj", "Pontosított vállalási díj pénznem"
+    d = pd.to_numeric(df[dij], errors="coerce")
+    elo = pd.to_numeric(df.get("Előkalkulált vállalási díj"), errors="coerce")
+    pn = df[pnem].astype(str)
+    nem_pont = ~pn.isin(["EUR", "HUF"])  # „Nem pontosított!” -> előkalkulált díj
+    d = d.where(~nem_pont, elo)
+    pn = pn.where(~nem_pont, df.get("Előkalkulált vállalási díj pénznem", "EUR").astype(str))
+    o = pd.DataFrame({
+        "fuvar": df["Fuvarszám"].astype(str).str.strip().str.split("-").str[0],
+        "tipus": df["Fuvarfeladat típusa"].astype(str).str.strip(),
+        "dij_eur": d.where(pn == "EUR"),
+        "penznem": pn,
+        "felvetel": pd.to_datetime(df.get("Első Felvételi állomás időkapu (dátum)"), errors="coerce"),
+    })
+    o["Forrás"] = Path(nev or getattr(src, "name", "") or "").name
+    return o.drop_duplicates("fuvar")
+
+
+def export_dij(korok: pd.DataFrame, naplo: pd.DataFrame | None) -> pd.DataFrame:
+    """Körönként az export szakasz díja a Fuvarnaplóból (fuvarszám alapján).
+
+    Megosztott körnél a kör díja csak részarány, ezért az export díjat a kör díja / összes fuvardíj
+    arányában vesszük. Ha egy export fuvar hiányzik a naplóból (vagy HUF-os), az export díj üres.
+    """
+    df = korok.copy()
+    df["Export díj"] = np.nan
+    df["Export díj forrás"] = "nincs fuvarnapló"
+    if naplo is None or naplo.empty:
+        return df
+    n = naplo.drop_duplicates("fuvar").set_index("fuvar")
+    e = df[["Kör ID", "Hónap", "Fuvarszámok", BEVETEL]].copy()
+    e["fuvar"] = e["Fuvarszámok"].astype(str).str.split(",")
+    e = e.explode("fuvar")
+    e["fuvar"] = e["fuvar"].str.strip().str.split("-").str[0]
+    e = e[e["fuvar"].str.fullmatch(r"\d+", na=False)].drop_duplicates(["Kör ID", "Hónap", "fuvar"])
+    e["van"] = e["fuvar"].isin(n.index)
+    e["tipus"] = e["fuvar"].map(n["tipus"])
+    e["dij"] = e["fuvar"].map(n["dij_eur"])
+    e["exp"] = e["tipus"].isin(EXPORT_TIPUSOK)
+    g = e.groupby(["Kör ID", "Hónap"])
+    s = pd.DataFrame({
+        "mind": g["van"].all(),
+        "osszes": g["dij"].sum(min_count=1),
+        "osszes_ok": g["dij"].apply(lambda v: v.notna().all()),
+        "exp_db": g["exp"].sum(),
+        "exp_dij": e[e["exp"]].groupby(["Kör ID", "Hónap"])["dij"].sum(min_count=1),
+        "exp_ok": e[e["exp"]].groupby(["Kör ID", "Hónap"])["dij"].apply(lambda v: v.notna().all()),
+        "kor_dij": g[BEVETEL].first(),
+    })
+    s["exp_ok"] = s["exp_ok"].fillna(False).astype(bool)
+    # megosztott kör: a kör díja részarány -> export díj ugyanilyen arányban
+    arany = (s["kor_dij"] / s["osszes"]).where(s["mind"] & s["osszes_ok"] & (s["osszes"] > 0))
+    megosztott = arany.notna() & ((arany - 1).abs() > 0.01) & (arany < 1)
+    s["Export díj"] = (s["exp_dij"] * arany.where(megosztott, 1.0)).where(s["mind"] & s["exp_ok"]
+                                                                        | (s["exp_ok"] & (s["exp_db"] > 0)))
+    s["Export díj forrás"] = np.select(
+        [s["Export díj"].notna() & megosztott, s["Export díj"].notna(), s["exp_db"].eq(0) & s["mind"]],
+        ["fuvarnapló (megosztott kör, arányosítva)", "fuvarnapló", "nincs export fuvar"],
+        "hiányzik a fuvarnaplóból")
+    s.loc[s["Export díj forrás"].eq("nincs export fuvar"), "Export díj"] = 0.0
+    df = df.drop(columns=["Export díj", "Export díj forrás"]).merge(
+        s[["Export díj", "Export díj forrás"]].reset_index(), on=["Kör ID", "Hónap"], how="left")
+    df["Export díj forrás"] = df["Export díj forrás"].fillna("hiányzik a fuvarnaplóból")
+    df["Import és egyéb díj"] = df[BEVETEL] - df["Export díj"]
+    df["Export díj aránya %"] = df["Export díj"] / df[BEVETEL].where(df[BEVETEL] > 0) * 100
+    return df
+
+
+def vallalkozoi(p: pd.DataFrame, b: pd.DataFrame, tobblet_kor: float = 50.0) -> pd.DataFrame:
+    """Csak az EXPORT szakasz kiadása alvállalkozónak a szerződéses (kiutalt) fuvaroknál.
 
     Feltevés: több az export, mint az import, így a felszabaduló saját autót másik fuvar váltja ki;
-    a fix költség tehát nem marad parlagon. A cél, hogy minden fuvar pluszos legyen: kiadva legalább
-    `tobblet_kor` EUR többlet maradjon körönként.
-    Max. alvállalkozói díj/kör = átlagos fuvardíj/kör − elvárt többlet.
+    a fix költség nem marad parlagon. A cél, hogy minden fuvar pluszos legyen: kiadva legalább
+    `tobblet_kor` EUR többlet maradjon az exporton.
+    Max. alvállalkozói díj / export = átlagos export díj − elvárt többlet (a Fuvarnaplóból).
     Kiadás javasolt: a mindig / többnyire negatív viszonylatoknál.
+    p: körök (Export díj oszloppal), b: besorol() eredménye.
     """
     o = b.copy()
     o["Km / kör"] = o["Km"] / o["Körök"]
     o["Díj / kör"] = o["Bevétel"] / o["Körök"]
     o["Saját eredmény / kör"] = o["Eredmény"] / o["Körök"]
+    pe = p[p["Viszonylat"].isin(o["Viszonylat"])]
+    if "Export díj" in pe:
+        ismert = pe[pe["Export díj"].notna() & (pe["Export díj"] > 0)]
+        ex = ismert.groupby("Viszonylat").agg(**{"Export díjas körök": ("Kör ID", "size"),
+                                                  "Export díj / kör": ("Export díj", "mean"),
+                                                  "_bev": ("Bevétel", "sum"), "_exp": ("Export díj", "sum")})
+        ex["Export díj aránya %"] = ex["_exp"] / ex["_bev"] * 100
+        o = o.merge(ex.drop(columns=["_bev", "_exp"]).reset_index(), on="Viszonylat", how="left")
+    else:
+        o["Export díjas körök"], o["Export díj / kör"], o["Export díj aránya %"] = 0, np.nan, np.nan
+    o["Export díjas körök"] = o["Export díjas körök"].fillna(0).astype(int)
     o["Elvárt többlet / kör"] = tobblet_kor
-    o["Max. alvállalkozói díj / kör"] = o["Díj / kör"] - tobblet_kor
-    o["Max. alvállalkozói díj / km"] = o["Max. alvállalkozói díj / kör"] / o["Km / kör"]
-    o["Javulás kiadással / kör"] = tobblet_kor - o["Saját eredmény / kör"]
-    o["Javulás kiadással (EUR)"] = o["Javulás kiadással / kör"] * o["Körök"]
+    o["Max. alvállalkozói díj / export"] = o["Export díj / kör"] - tobblet_kor
+    o["Kiadott exportok többlete (EUR)"] = np.where(o["Export díj / kör"].notna(), tobblet_kor * o["Körök"], np.nan)
     neg = o["Kategória"].isin(KATEGORIAK[:2])
     o["Javaslat"] = np.where(neg, "Kiadni", np.where(o["Kategória"] == KATEGORIAK[2], "Figyelni", "Megtartani"))
-    if piaci_ar_km:
-        o["Piaci alv. díj / kör"] = piaci_ar_km * o["Km / kör"]
-        o["Kiadva többlet / kör"] = o["Díj / kör"] - o["Piaci alv. díj / kör"]
-        o["Piaci díjjal teljesül?"] = np.where(o["Kiadva többlet / kör"] >= tobblet_kor, "igen", "nem")
     rend = {"Kiadni": 0, "Figyelni": 1, "Megtartani": 2}
     return o.sort_values(["Javaslat", "Saját eredmény / kör"], key=lambda c: c.map(rend) if c.name == "Javaslat" else c)

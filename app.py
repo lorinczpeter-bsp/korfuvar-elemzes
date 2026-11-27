@@ -123,11 +123,18 @@ def betolt(files: tuple[tuple[str, bytes], ...]) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True).drop_duplicates(subset=["Kör ID", "Fuvarszámok"])
 
 
-def forrasfajlok(feltoltott) -> tuple[tuple[str, bytes], ...]:
+def forrasfajlok(feltoltott, minta: str = "korfuvarok_*.xlsx") -> tuple[tuple[str, bytes], ...]:
     if feltoltott:
         return tuple((f.name, f.getvalue()) for f in feltoltott)
-    helyi = sorted((ROOT / "data").glob("korfuvarok_*.xlsx"))
+    helyi = sorted((ROOT / "data").glob(minta))
     return tuple((p.name, p.read_bytes()) for p in helyi)
+
+
+@st.cache_data(show_spinner="Fuvarnapló betöltése…")
+def betolt_naplo(files: tuple[tuple[str, bytes], ...]) -> pd.DataFrame | None:
+    if not files:
+        return None
+    return pd.concat([kd.read_fuvarnaplo(b, nev) for nev, b in files], ignore_index=True).drop_duplicates("fuvar")
 
 
 brand()
@@ -156,6 +163,11 @@ with st.expander("Forrásfájlok és beállítások", expanded=False):
     if c1.button("Létszám frissítése a Google-táblázatból"):
         flotta_google.clear()
         st.session_state.pop("flotta", None)
+    naplo_fajlok = c1.file_uploader("Fuvarnapló-export(ok) az export díjához (InnoTMS logbooks_list.xlsx)", type="xlsx",
+                                    accept_multiple_files=True,
+                                    help="Fuvarszám, fuvarfeladat típusa és vállalási díj. Ebből számolja a körök "
+                                         "export szakaszának díját (Vállalkozói összevetés). Több hónap egyszerre is "
+                                         "feltölthető; a hónap eleji körök miatt az előző hónap vége is kell.")
     flotta_fajl = c1.file_uploader("Tartalék: havi létszám CSV (ha a Google-táblázat nem érhető el)", type="csv",
                                    help="Formátum: config/flotta_minta.csv. A Szcenárió fülön kézzel is kitölthető.")
     st.caption("Költségbesorolás (fix / futással arányos): config/koltseg_besorolas.csv. "
@@ -203,7 +215,12 @@ if flotta_hiba:
 elif not sheet_url and not st.session_state.get("flotta_nev") and not len(flotta):
     st.info("Nincs megadva a létszám Google-táblázata (secrets: flotta_sheet_url), és nincs feltöltött létszámfájl.")
 adat = kd.prepare(raw, besorolas, flotta, st.session_state.get("cel"), egyszeri_szures=egyszeri)
-korok = kd.set_viszonylat(adat.korok, szint)
+try:
+    naplo = betolt_naplo(forrasfajlok(naplo_fajlok, "fuvarnaplo_*.xlsx"))
+    naplo_hiba = None
+except Exception as e:  # noqa: BLE001
+    naplo, naplo_hiba = None, f"{type(e).__name__}: {e}"[:300]
+korok = kd.set_viszonylat(kd.export_dij(adat.korok, naplo), szint)
 honapok = sorted(korok["Hónap"].dropna().unique())
 
 f1, f2, f3 = st.columns([3, 1, 1])
@@ -512,41 +529,52 @@ with t_part:
 with t_vall:
     st.markdown('<div class="note">A szerződéses, kiutalt fuvarokat el kell vállalni. Mivel több az export, mint az '
                 'import, a felszabaduló saját autót másik fuvar váltja ki, így a fix költség nem marad parlagon. '
-                'Ezért a <strong>mindig vagy többnyire negatív</strong> viszonylatokat érdemes alvállalkozónak kiadni, '
-                'akkor is, ha csak kis többlet marad rajtuk: a cél, hogy minden fuvar pluszos legyen. '
-                '<strong>Max. alvállalkozói díj = átlagos fuvardíj − elvárt többlet</strong> (körönként).</div>',
-                unsafe_allow_html=True)
-    v1, v2 = st.columns(2)
-    tobblet = v1.number_input("Elvárt többlet kiadásnál (EUR / kör)", 0, 1000, 50, 10)
-    piaci = v2.number_input("Ismert piaci alvállalkozói díj (EUR/km, 0 = nincs)", 0.0, 3.0, 0.0, 0.01, format="%.2f",
-                            help="Ha megadod, megmutatja, hogy ezen a díjon teljesül-e az elvárt többlet.")
-    bv = kd.vallalkozoi(kd.besorol(p, alap=alap, min_kor=int(min_kor), elvart=elvart), float(tobblet),
-                        piaci or None)
+                'A <strong>mindig vagy többnyire negatív</strong> viszonylatoknál <strong>csak az exportot</strong> '
+                'adjuk ki alvállalkozónak, akkor is, ha kis többlet marad rajta: a cél, hogy minden fuvar pluszos '
+                'legyen. <strong>Max. alvállalkozói díj = az export fuvar díja − elvárt többlet</strong>. '
+                'Az export díja a Fuvarnaplóból jön, fuvarszám alapján.</div>', unsafe_allow_html=True)
+    if naplo_hiba:
+        st.warning(f"A Fuvarnapló nem olvasható be: {naplo_hiba}")
+    elif naplo is None:
+        st.info("Az export díjához tölts fel Fuvarnapló-exportot (InnoTMS logbooks_list.xlsx) a "
+                "„Forrásfájlok és beállítások” részben.")
+    ismert = int(p["Export díj"].gt(0).sum())
+    hianyzo = p[p["Export díj forrás"].eq("hiányzik a fuvarnaplóból")]
+    if naplo is not None:
+        hh = hianyzo.groupby("Hónap").size()
+        st.caption(f"Export díj ismert: {ismert} kör a {len(p)}-ből. Hiányzik a fuvarnaplóból: "
+                   + (", ".join(f"{h}: {n} kör" for h, n in hh.items()) or "egy sem")
+                   + ". Ezekhez a hónapokhoz (és az előző hónap végéhez) tölts fel Fuvarnaplót.")
+    tobblet = st.number_input("Elvárt többlet kiadásnál (EUR / export)", 0, 1000, 50, 10)
+    bv = kd.vallalkozoi(p, kd.besorol(p, alap=alap, min_kor=int(min_kor), elvart=elvart), float(tobblet))
     ki = bv[bv["Javaslat"] == "Kiadni"]
     vk = st.columns(3)
     kpi(vk[0], "Kiadásra javasolt", f"{len(ki)} viszonylat", f"{int(ki['Körök'].sum())} kör", dark=True)
-    kpi(vk[1], "Saját eredményük most", fmt(ki["Eredmény"].sum(), EUR), "a vizsgált időszakban")
-    kpi(vk[2], "Javulás, ha az elvárt többlettel kiadjuk", fmt(ki["Javulás kiadással (EUR)"].sum(), EUR),
-        f"{fmt(tobblet, '{:,.0f}')} € többlet × {int(ki['Körök'].sum())} kör, a saját veszteség helyett")
+    kpi(vk[1], "Saját eredményük most", fmt(ki["Eredmény"].sum(), EUR), "a teljes körökön, a vizsgált időszakban")
+    kpi(vk[2], "Export díj ismert", f"{int((ki['Export díjas körök'] > 0).sum())} / {len(ki)} viszonylat",
+        f"{int(ki['Export díjas körök'].sum())} kör export díja a Fuvarnaplóból")
     st.write("")
-    vcol = ["Viszonylat", "Javaslat", "Kategória", "Körök", "Km / kör", "Díj / kör", "Saját eredmény / kör",
-            "Max. alvállalkozói díj / kör", "Max. alvállalkozói díj / km", "Bevétel / km", "Javulás kiadással / kör",
-            "Javulás kiadással (EUR)"]
-    if piaci:
-        vcol += ["Piaci alv. díj / kör", "Kiadva többlet / kör", "Piaci díjjal teljesül?"]
+    vcol = ["Viszonylat", "Javaslat", "Kategória", "Körök", "Saját eredmény / kör", "Díj / kör",
+            "Export díjas körök", "Export díj / kör", "Export díj aránya %", "Max. alvállalkozói díj / export",
+            "Km / kör"]
     st.dataframe(bv[vcol], hide_index=True, width="stretch", height=560, column_config={
-        "Km / kör": st.column_config.NumberColumn(format="%.0f"),
-        "Díj / kör": st.column_config.NumberColumn("Átl. díj / kör", format="%.0f €"),
-        "Saját eredmény / kör": st.column_config.NumberColumn("Saját eredmény / kör", format="%.0f €"),
-        "Max. alvállalkozói díj / kör": st.column_config.NumberColumn(
-            format="%.0f €", help="Átlagos fuvardíj − elvárt többlet: legfeljebb ennyit fizethetünk az alvállalkozónak"),
-        "Max. alvállalkozói díj / km": st.column_config.NumberColumn(format="%.3f"),
-        "Bevétel / km": st.column_config.NumberColumn("Díj / km", format="%.3f"),
-        "Javulás kiadással / kör": st.column_config.NumberColumn(format="%.0f €",
-                                                                 help="Elvárt többlet − saját eredmény / kör"),
-        "Javulás kiadással (EUR)": st.column_config.NumberColumn(format="%.0f €"),
-        "Piaci alv. díj / kör": st.column_config.NumberColumn(format="%.0f €"),
-        "Kiadva többlet / kör": st.column_config.NumberColumn(format="%.0f €")})
+        "Km / kör": st.column_config.NumberColumn("Km / kör (teljes kör)", format="%.0f"),
+        "Díj / kör": st.column_config.NumberColumn("Teljes kör díja", format="%.0f €"),
+        "Saját eredmény / kör": st.column_config.NumberColumn("Saját eredmény / kör", format="%.0f €",
+                                                              help="A teljes kör eredménye saját autóval"),
+        "Export díjas körök": st.column_config.NumberColumn(help="Ennyi körnél ismert az export díja a Fuvarnaplóból"),
+        "Export díj / kör": st.column_config.NumberColumn("Export díja", format="%.0f €",
+                                                          help="Átlagos export fuvardíj (megbízói díj) körönként"),
+        "Export díj aránya %": st.column_config.NumberColumn("Export a kör díjából", format="%.0f%%"),
+        "Max. alvállalkozói díj / export": st.column_config.NumberColumn(
+            format="%.0f €", help="Export díja − elvárt többlet: legfeljebb ennyit fizethetünk az alvállalkozónak")})
+    if naplo is not None:
+        with st.expander("Körök export díjjal"):
+            st.dataframe(p[["Kör ID", "Hónap", "Viszonylat", "Megbízók", "Fuvarszámok", "Bevétel", "Export díj",
+                            "Import és egyéb díj", "Export díj forrás", "Eredmény"]],
+                         hide_index=True, width="stretch", column_config={
+                             c: st.column_config.NumberColumn(format="%.0f €")
+                             for c in ["Bevétel", "Export díj", "Import és egyéb díj", "Eredmény"]})
 
 # --------------------------------------------------------------------------- Szcenárió
 with t_szc:
@@ -639,7 +667,7 @@ with t_lsz:
 with t_kor:
     cols = ["Kör ID", "Hónap", "Viszonylat", "Régiópár", "Reláció", "Célország", "Megbízók", "Vontatmány", "Státusz",
             "Km", "Rakott km %", "Bevétel", "Futással arányos ktg", "Fix ktg", "Fedezet", "Eredmény",
-            "Bevétel / km", "Fedezet / km", "Eredmény / km", "Eredmény (szcenárió) / km"]
+            "Bevétel / km", "Fedezet / km", "Eredmény / km", "Eredmény (szcenárió) / km", "Export díj"]
     keres = st.text_input("Keresés (viszonylat, megbízó, rendszám)", placeholder="pl. DE65, HARTMANN, AEBY409")
     kt = p[cols]
     if keres:
@@ -649,7 +677,7 @@ with t_kor:
     st.dataframe(kt, hide_index=True, width="stretch", height=560, column_config={
         **{c: st.column_config.NumberColumn(format="%.3f") for c in cols if c.endswith("/ km")},
         **{c: st.column_config.NumberColumn(format="%.0f €") for c in
-           ["Bevétel", "Futással arányos ktg", "Fix ktg", "Fedezet", "Eredmény"]},
+           ["Bevétel", "Futással arányos ktg", "Fix ktg", "Fedezet", "Eredmény", "Export díj"]},
         "Km": st.column_config.NumberColumn(format="%.0f"),
         "Rakott km %": st.column_config.NumberColumn(format="%.1f%%")})
 
