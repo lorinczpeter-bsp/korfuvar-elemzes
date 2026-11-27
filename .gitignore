@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+data/*.xlsx
+config/flotta_*.csv
+!config/flotta_minta.csv
+.streamlit/secrets.toml
+kepernyokep*.png

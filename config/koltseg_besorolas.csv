@@ -1,0 +1,55 @@
+oszlop;csoport;tipus
+Gázolaj költség;Üzemanyag;futás
+Adblue költség;Üzemanyag;futás
+Kenőanyag;Üzemanyag;futás
+Belga;Útdíj;futás
+Cseh;Útdíj;futás
+Francia;Útdíj;futás
+Holland;Útdíj;futás
+Magyar;Útdíj;futás
+Német;Útdíj;futás
+Olasz;Útdíj;futás
+Osztrák;Útdíj;futás
+Román;Útdíj;futás
+Svájc;Útdíj;futás
+Szlovén;Útdíj;futás
+Szlovák;Útdíj;futás
+Spanifer;Útdíj;futás
+Komp;Útdíj;futás
+Bruttó bér+pótlékok;Sofőrbér és napidíj;futás
+SZOCHO bér+üa. megtak;Sofőrbér és napidíj;futás
+Külföldi;Sofőrbér és napidíj;futás
+Belföldi;Sofőrbér és napidíj;futás
+Adó;Sofőrbér és napidíj;futás
+Adóköteles;Sofőrbér és napidíj;futás
+Adómentes;Sofőrbér és napidíj;futás
+Alkatrész;Karbantartás;futás
+Gumi;Karbantartás;futás
+Új gumi;Karbantartás;futás
+Javítás;Karbantartás;futás
+Idegen javítás;Karbantartás;futás
+Szerelés, javítás;Karbantartás;futás
+Scania JKSZ;Karbantartás;futás
+Mosás;Karbantartás;futás
+Parkolás;Egyéb futás;futás
+CMR;Egyéb futás;futás
+Büntetés;Egyéb futás;futás
+Kártérítés;Egyéb futás;futás
+Vontató amortizáció;Amortizáció / lízing;fix
+Pótkocsi amortizáció;Amortizáció / lízing;fix
+Adminisztráció amortizáció;Amortizáció / lízing;fix
+Fuvarozás amortizáció;Amortizáció / lízing;fix
+KGFB;Biztosítás és adó;fix
+Casco;Biztosítás és adó;fix
+Biztosítás;Biztosítás és adó;fix
+Gépjárműadó (súyadó);Biztosítás és adó;fix
+Iparűzési adó;Biztosítás és adó;fix
+Engedély;Biztosítás és adó;fix
+Bruttó bér - admin;Általános / admin;fix
+Általános költség;Általános / admin;fix
+Rezsi költségek;Általános / admin;fix
+Scania Control;Általános / admin;fix
+Munkaruha;Általános / admin;fix
+Takarítás;Általános / admin;fix
+Egyéb szolgáltatás;Általános / admin;fix
+Útdíj költség;Részösszeg (nem számít bele);részösszeg
