@@ -57,6 +57,8 @@ def load_flotta(src=None) -> pd.DataFrame:
 # --------------------------------------------------------------------------- segédek
 _CIM = re.compile(r"^\s*([A-Za-z]{1,2})[\s\-]*(?:[A-Za-z]{1,2}-)?(\d{4,5})\s*(?:[A-Z]{2}\s)?\s*(.*)$")
 _ORSZAG_ALIAS = {"D": "DE", "F": "FR", "I": "IT", "A": "AT", "B": "BE", "L": "LU", "H": "HU"}
+_ELOTAG = {"san", "santa", "santo", "st", "ste", "sankt", "saint", "sainte", "bad", "le", "la", "les", "l'",
+           "den", "de", "het", "s", "mont", "port", "villa", "castel", "porto", "monte", "val", "bois", "neu"}
 _KOTOSZO = {"am", "an", "bei", "der", "im", "in", "de", "di", "la", "le", "les", "en", "sur", "sous",
             "del", "della", "d'", "aan", "den", "op", "sul"}
 
@@ -76,7 +78,7 @@ def _cim_reszek(cim):
             continue
         elozo = varos[-1] if varos else ""
         if (i == 0 or w.lower() in _KOTOSZO or elozo.lower() in _KOTOSZO
-                or (i == 1 and len(elozo) <= 4) or w[:1].islower() and "'" in w):
+                or (i == 1 and elozo.lower().rstrip(".") in _ELOTAG) or w[:1].islower() and "'" in w):
             varos.append(w)
         else:
             break
@@ -226,8 +228,14 @@ def load(paths_or_files, besorolas=None, flotta=None, cel_letszam=None) -> Adat:
 # --------------------------------------------------------------------------- aggregálás
 def osszesit(df: pd.DataFrame, by: list[str], elvart: float = 0.0) -> pd.DataFrame:
     """elvart: elvárt árbevétel-arányos eredmény (0,05 = 5%)."""
+    df = df.assign(_napok=pd.to_numeric(df.get("Menetlevél ∑ nap"), errors="coerce"),
+                   _rakott_km=df["Km"] * pd.to_numeric(df.get("Rakott km %"), errors="coerce") / 100,
+                   _km_rakottal=df["Km"].where(pd.to_numeric(df.get("Rakott km %"), errors="coerce").notna()))
     g = df.groupby(by, dropna=False)
     out = g.agg(**{
+        "Napok": ("_napok", "sum"),
+        "_rakott_km": ("_rakott_km", "sum"),
+        "_km_rakottal": ("_km_rakottal", "sum"),
         "Körök": ("Kör ID", "size"),
         "Hónapok": ("Hónap", "nunique"),
         "Km": ("Km", "sum"),
@@ -242,6 +250,10 @@ def osszesit(df: pd.DataFrame, by: list[str], elvart: float = 0.0) -> pd.DataFra
     for c in ["Bevétel", "Futással arányos ktg", "Fix ktg", "Fix ktg (szcenárió)",
               "Fedezet", "Eredmény", "Eredmény (szcenárió)"]:
         out[f"{c} / km"] = out[c] / out["Km"].where(out["Km"] > 0)
+    out["Nap / kör"] = out["Napok"] / out["Körök"]
+    out["Km / nap"] = out["Km"] / out["Napok"].where(out["Napok"] > 0)
+    out["Üres km %"] = (1 - out["_rakott_km"] / out["_km_rakottal"].where(out["_km_rakottal"] > 0)) * 100
+    out = out.drop(columns=["_rakott_km", "_km_rakottal"])
     # Nullszaldós díj: az a fajlagos díj, amelynél az eredmény 0 (= teljes költség / km)
     out["Nullszaldós díj / km"] = out["Futással arányos ktg / km"] + out["Fix ktg / km"]
     out["Nullszaldós díj / km (szcenárió)"] = out["Futással arányos ktg / km"] + out["Fix ktg (szcenárió) / km"]
@@ -392,3 +404,42 @@ def okok(df: pd.DataFrame, min_kor: int = 3) -> pd.DataFrame:
 
     b["Fő okok"] = b.apply(szoveg, axis=1)
     return b
+
+
+# --------------------------------------------------------------------------- további nézetek
+def import_parositas(df: pd.DataFrame, elvart: float = 0.0) -> pd.DataFrame:
+    """Exportcélonként: melyik import-felrakó (visszfuvar) hozza a legjobb kört."""
+    d = df.assign(**{"Import felrakó": df["Befelé kezdő cím"].map(telephely)
+                     .fillna(df["Nemzetközi (semleges) záró cím"].map(telephely)).fillna("– (nincs import)")})
+    return osszesit(d, ["Viszonylat", "Import felrakó"], elvart)
+
+
+def partnerek(df: pd.DataFrame, elvart: float = 0.0) -> pd.DataFrame:
+    """Megrendelőnként: azok a körök, amelyekben a partner szerepel (egy kör több partnernél is számít)."""
+    d = df.assign(Partner=df["Megbízók"].fillna("–").astype(str).str.split(r"\s*\|\s*")).explode("Partner")
+    d["Partner"] = d["Partner"].str.strip()
+    out = osszesit(d, ["Partner"], elvart)
+    neg = d.assign(_n=d["Eredmény"] < 0).groupby("Partner")["_n"].mean() * 100
+    out["Negatív körök %"] = out["Partner"].map(neg)
+    return out
+
+
+def trend(df: pd.DataFrame) -> pd.DataFrame:
+    return osszesit(df, ["Viszonylat", "Hónap"])
+
+
+def vallalkozoi(b: pd.DataFrame, ar_km: float, fix_marad: bool = True) -> pd.DataFrame:
+    """Kiadás alvállalkozónak vs. saját futás viszonylatonként.
+
+    Kiadva: bevétel − alvállalkozói díj. Saját futás: fix_marad esetén a fedezet (a fix költség
+    mindenképp nálunk marad, az autó áll), különben a teljes eredmény (az autó máshol hasznosítható).
+    """
+    o = b.copy()
+    o["Alvállalkozói díj / km"] = ar_km
+    o["Kiadva eredmény / km"] = o["Bevétel / km"] - ar_km
+    o["Saját futás / km"] = o["Fedezet / km"] if fix_marad else o["Eredmény / km"]
+    o["Kiadás előnye / km"] = o["Kiadva eredmény / km"] - o["Saját futás / km"]
+    o["Kiadás előnye (EUR)"] = o["Kiadás előnye / km"] * o["Km"]
+    o["Max. alvállalkozói díj / km"] = o["Futással arányos ktg / km"] if fix_marad else o["Nullszaldós díj / km"]
+    o["Döntés"] = np.where(o["Kiadás előnye / km"] > 0, "Kiadni megéri", "Saját autóval jobb")
+    return o.sort_values("Kiadás előnye / km", ascending=False)

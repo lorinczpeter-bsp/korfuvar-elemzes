@@ -5,6 +5,7 @@ import base64
 import io
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -236,9 +237,9 @@ kpi(k[3], "Értékelt körök", f"{int(ossz['Körök'])}",
     f"{fmt(ossz['Km'], '{:,.0f} km')} · {len(korok) - len(korok[korok['Pénzügyi körben']])} kör kizárva (Adatminőség fül)")
 st.write("")
 
-t_att, t_rossz, t_visz, t_szc, t_lsz, t_kor, t_adat = st.tabs(
-    ["Áttekintés", "Legrosszabb körök", "Viszonylatok", "Szcenárió: teljes sofőrállomány", "Létszám", "Körök",
-     "Adatminőség"])
+t_att, t_rossz, t_visz, t_part, t_vall, t_szc, t_lsz, t_kor, t_adat = st.tabs(
+    ["Áttekintés", "Legrosszabb körök", "Viszonylatok", "Partnerek", "Vállalkozói összevetés",
+     "Szcenárió: teljes sofőrállomány", "Létszám", "Körök", "Adatminőség"])
 
 # --------------------------------------------------------------------------- Áttekintés
 with t_att:
@@ -382,55 +383,163 @@ with t_rossz:
 
 # --------------------------------------------------------------------------- Viszonylatok
 with t_visz:
-    b = kd.besorol(p, alap=alap, min_kor=int(min_kor), elvart=elvart)
-    st.markdown(f'<div class="note"><strong>{len(b)} visszatérő viszonylat</strong> ({szint.lower()}, '
-                f'legalább {int(min_kor)} kör). Besorolás alapja: <strong>{alap}</strong>, '
-                f'a negatív körök aránya szerint.</div>', unsafe_allow_html=True)
-    kc = st.columns(5)
-    for i, kat in enumerate(kd.KATEGORIAK):
-        bb = b[b["Kategória"] == kat]
-        kpi(kc[i], kat, f"{len(bb)}", f"{int(bb['Körök'].sum())} kör · {fmt(bb['Eredmény'].sum(), EUR)}")
-    st.write("")
+    vb, vtr, vip = st.tabs(["Besorolás", "Trend havonta", "Import-párosítás"])
+    with vb:
+        b = kd.besorol(p, alap=alap, min_kor=int(min_kor), elvart=elvart)
+        st.markdown(f'<div class="note"><strong>{len(b)} visszatérő viszonylat</strong> ({szint.lower()}, '
+                    f'legalább {int(min_kor)} kör). Besorolás alapja: <strong>{alap}</strong>, '
+                    f'a negatív körök aránya szerint.</div>', unsafe_allow_html=True)
+        kc = st.columns(5)
+        for i, kat in enumerate(kd.KATEGORIAK):
+            bb = b[b["Kategória"] == kat]
+            kpi(kc[i], kat, f"{len(bb)}", f"{int(bb['Körök'].sum())} kör · {fmt(bb['Eredmény'].sum(), EUR)}")
+        st.write("")
 
-    fig = px.scatter(b, x="Fedezet / km", y="Eredmény / km", size="Körök", color="Kategória",
-                     color_discrete_map=KAT_SZIN, category_orders={"Kategória": kd.KATEGORIAK},
-                     hover_name="Viszonylat", size_max=36,
-                     hover_data={"Körök": True, "Negatív körök %": ":.0f", "Bevétel / km": ":.3f",
-                                 "Eredmény (szcenárió) / km": ":.3f", "Javaslat": True},
-                     title="Viszonylatok: fedezet és teljes eredmény (EUR/km)")
-    fig.add_vline(x=0, line_dash="dot", line_color="#9CA3AF")
-    fig.add_hline(y=0, line_dash="dot", line_color="#9CA3AF")
-    st.plotly_chart(style_fig(fig, 460), width="stretch")
-    st.caption("Bal oldalt (negatív fedezet) a futással arányos költséget sem hozza be: vállalkozónak adható. "
-               "Jobb alsó negyed: fedezetet termel, de a fix költséget nem fedezi; eladásakor a fix költség nálunk marad.")
+        fig = px.scatter(b, x="Fedezet / km", y="Eredmény / km", size="Körök", color="Kategória",
+                         color_discrete_map=KAT_SZIN, category_orders={"Kategória": kd.KATEGORIAK},
+                         hover_name="Viszonylat", size_max=36,
+                         hover_data={"Körök": True, "Negatív körök %": ":.0f", "Bevétel / km": ":.3f",
+                                     "Eredmény (szcenárió) / km": ":.3f", "Javaslat": True},
+                         title="Viszonylatok: fedezet és teljes eredmény (EUR/km)")
+        fig.add_vline(x=0, line_dash="dot", line_color="#9CA3AF")
+        fig.add_hline(y=0, line_dash="dot", line_color="#9CA3AF")
+        st.plotly_chart(style_fig(fig, 460), width="stretch")
+        st.caption("Bal oldalt (negatív fedezet) a futással arányos költséget sem hozza be: vállalkozónak adható. "
+                   "Jobb alsó negyed: fedezetet termel, de a fix költséget nem fedezi; eladásakor a fix költség nálunk marad.")
 
-    kat_szuro = st.multiselect("Kategória", kd.KATEGORIAK, default=kd.KATEGORIAK)
-    bt = b[b["Kategória"].isin(kat_szuro)]
-    cols = ["Viszonylat", "Kategória", "Körök", "Hónapok", "Negatív körök %", "Fedezet negatív %",
-            "Bevétel / km", "Árbevétel-arányos eredmény %", "Nullszaldós díj / km", "Szükséges díj / km",
-            "Hiányzó díj / km", "Szükséges díjemelés %", "Szükséges díj / km (szcenárió)", "Futással arányos ktg / km", "Fix ktg / km", "Fedezet / km",
-            "Eredmény / km", "Eredmény (szcenárió) / km", "Eredmény", "Javaslat"]
-    st.dataframe(bt[cols], hide_index=True, width="stretch", height=460, column_config={
-        **{c: st.column_config.NumberColumn(format="%.3f") for c in cols if c.endswith("/ km")},
-        "Negatív körök %": st.column_config.ProgressColumn(format="%.0f%%", min_value=0, max_value=100),
-        "Fedezet negatív %": st.column_config.NumberColumn(format="%.0f%%"),
+        kat_szuro = st.multiselect("Kategória", kd.KATEGORIAK, default=kd.KATEGORIAK)
+        bt = b[b["Kategória"].isin(kat_szuro)]
+        cols = ["Viszonylat", "Kategória", "Körök", "Hónapok", "Negatív körök %", "Fedezet negatív %",
+                "Nap / kör", "Km / nap", "Üres km %",
+                "Bevétel / km", "Árbevétel-arányos eredmény %", "Nullszaldós díj / km", "Szükséges díj / km",
+                "Hiányzó díj / km", "Szükséges díjemelés %", "Szükséges díj / km (szcenárió)", "Futással arányos ktg / km", "Fix ktg / km", "Fedezet / km",
+                "Eredmény / km", "Eredmény (szcenárió) / km", "Eredmény", "Javaslat"]
+        st.dataframe(bt[cols], hide_index=True, width="stretch", height=460, column_config={
+            **{c: st.column_config.NumberColumn(format="%.3f") for c in cols if c.endswith("/ km")},
+            "Negatív körök %": st.column_config.ProgressColumn(format="%.0f%%", min_value=0, max_value=100),
+            "Fedezet negatív %": st.column_config.NumberColumn(format="%.0f%%"),
+            "Nap / kör": st.column_config.NumberColumn(format="%.1f", help="Menetlevél szerinti napok átlagosan"),
+            "Km / nap": st.column_config.NumberColumn(format="%.0f", help="Alacsony érték: sok állás / várakozás"),
+            "Üres km %": st.column_config.NumberColumn(format="%.1f%%", help="Üresen futott km aránya (km-súlyozott)"),
+            "Bevétel / km": st.column_config.NumberColumn("Díj / km", format="%.3f"),
+            "Szükséges díjemelés %": st.column_config.NumberColumn(format="%.1f%%"),
+            "Árbevétel-arányos eredmény %": st.column_config.NumberColumn("Eredmény %", format="%.1f%%"),
+            "Eredmény": st.column_config.NumberColumn(format="%.0f €")})
+
+        vis = st.selectbox("Viszonylat körei", b["Viszonylat"], index=None, placeholder="Válassz viszonylatot…")
+        if vis:
+            kk = p[p["Viszonylat"] == vis]
+            st.dataframe(kk[["Kör ID", "Hónap", "Reláció", "Megbízók", "Vontatmány", "Kör kezdete dátum",
+                             "Kör vége dátum", "Km", "Bevétel / km", "Fedezet / km", "Eredmény / km",
+                             "Eredmény (szcenárió) / km", "Eredmény"]],
+                         hide_index=True, width="stretch", column_config={
+                             **{c: st.column_config.NumberColumn(format="%.3f") for c in kk.columns if c.endswith("/ km")},
+                             "Km": st.column_config.NumberColumn(format="%.0f"),
+                             "Eredmény": st.column_config.NumberColumn(format="%.0f €"),
+                             "Kör kezdete dátum": st.column_config.DateColumn(format="YYYY.MM.DD"),
+                             "Kör vége dátum": st.column_config.DateColumn(format="YYYY.MM.DD")})
+
+
+    with vtr:
+        tr = kd.trend(p)
+        gyak = p["Viszonylat"].value_counts()
+        gyak = gyak[~gyak.index.astype(str).str.startswith("–")]
+        alap_v = list(gyak[gyak >= int(min_kor)].index[:6])
+        tv = st.multiselect("Viszonylatok", list(gyak.index), default=alap_v, key="trend_v")
+        mut = st.radio("Mutató", ["Eredmény / km", "Bevétel / km", "Fedezet / km", "Eredmény (szcenárió) / km"],
+                       horizontal=True, key="trend_m")
+        tt = tr[tr["Viszonylat"].isin(tv)]
+        if len(tt):
+            fig = px.line(tt, x="Hónap", y=mut, color="Viszonylat", markers=True, hover_data={"Körök": True},
+                          title=f"{mut} havonta (EUR/km)")
+            fig.add_hline(y=0, line_dash="dot", line_color="#9CA3AF")
+            fig.update_xaxes(type="category")
+            st.plotly_chart(style_fig(fig, 440), width="stretch")
+            piv = tt.pivot_table(index="Viszonylat", columns="Hónap", values=mut).round(3)
+            piv["Körök"] = tt.groupby("Viszonylat")["Körök"].sum()
+            st.dataframe(piv, width="stretch")
+        st.caption("Egy hónapban kevés kör esetén egyetlen kör is nagyot mozdíthat az értéken; a Körök oszlop mutatja a mintát.")
+    with vip:
+        st.markdown('<div class="note">Egy exportcélhoz (kifelé lerakó) melyik visszfuvar (befelé felrakó telephely) '
+                    'hozza a legjobb kört. A kör teljes eredménye számít, a ki- és visszaút együtt.</div>',
+                    unsafe_allow_html=True)
+        ipd = kd.import_parositas(p, elvart)
+        celok = [v for v in gyak.index if v in set(ipd["Viszonylat"])]
+        cel = st.selectbox("Exportcél", celok, key="ip_cel")
+        it = ipd[ipd["Viszonylat"] == cel].sort_values("Eredmény / km", ascending=False)
+        icol = ["Import felrakó", "Körök", "Km", "Bevétel / km", "Fedezet / km", "Eredmény / km", "Nap / kör",
+                "Km / nap", "Üres km %", "Eredmény"]
+        st.dataframe(it[icol], hide_index=True, width="stretch", column_config={
+            **{c: st.column_config.NumberColumn(format="%.3f") for c in icol if c.endswith("/ km")},
+            "Bevétel / km": st.column_config.NumberColumn("Díj / km", format="%.3f"),
+            "Km": st.column_config.NumberColumn(format="%.0f"),
+            "Nap / kör": st.column_config.NumberColumn(format="%.1f"),
+            "Km / nap": st.column_config.NumberColumn(format="%.0f"),
+            "Üres km %": st.column_config.NumberColumn(format="%.1f%%"),
+            "Eredmény": st.column_config.NumberColumn(format="%.0f €")})
+        if len(it):
+            fig = px.bar(it.head(15), x="Eredmény / km", y="Import felrakó", orientation="h",
+                         color=np.where(it.head(15)["Eredmény / km"] >= 0, "pozitív", "negatív"),
+                         color_discrete_map={"pozitív": NAVY, "negatív": "#B54708"},
+                         text=[fmt(v, "{:.3f}") for v in it.head(15)["Eredmény / km"]],
+                         title=f"{cel}: eredmény / km visszfuvaronként")
+            fig.update_layout(showlegend=False, yaxis=dict(autorange="reversed", title=None))
+            st.plotly_chart(style_fig(fig, max(300, 34 * min(len(it), 15) + 120)), width="stretch")
+
+# --------------------------------------------------------------------------- Partnerek
+with t_part:
+    st.markdown('<div class="note">Megrendelőnként azok a körök, amelyekben a partner szerepel. Mivel egy körben '
+                'több megrendelő is lehet (export és import), egy kör több partnernél is megjelenik, így az '
+                'összegek nem adhatók össze. A kör szintű bevétel nem bontható partnerekre.</div>',
+                unsafe_allow_html=True)
+    pa = kd.partnerek(p, elvart)
+    min_p = st.number_input("Legalább ennyi kör", 1, 50, 3, key="part_min")
+    pa = pa[pa["Körök"] >= min_p].sort_values("Eredmény / km")
+    pcol = ["Partner", "Körök", "Hónapok", "Km", "Negatív körök %", "Bevétel / km", "Fedezet / km",
+            "Eredmény / km", "Szükséges díj / km", "Hiányzó díj / km", "Nap / kör", "Km / nap", "Üres km %",
+            "Eredmény"]
+    st.dataframe(pa[pcol], hide_index=True, width="stretch", height=520, column_config={
+        **{c: st.column_config.NumberColumn(format="%.3f") for c in pcol if c.endswith("/ km")},
         "Bevétel / km": st.column_config.NumberColumn("Díj / km", format="%.3f"),
-        "Szükséges díjemelés %": st.column_config.NumberColumn(format="%.1f%%"),
-        "Árbevétel-arányos eredmény %": st.column_config.NumberColumn("Eredmény %", format="%.1f%%"),
-        "Eredmény": st.column_config.NumberColumn(format="%.0f €")})
+        "Negatív körök %": st.column_config.ProgressColumn(format="%.0f%%", min_value=0, max_value=100),
+        "Km": st.column_config.NumberColumn(format="%.0f"),
+        "Nap / kör": st.column_config.NumberColumn(format="%.1f"),
+        "Km / nap": st.column_config.NumberColumn(format="%.0f"),
+        "Üres km %": st.column_config.NumberColumn(format="%.1f%%"),
+        "Eredmény": st.column_config.NumberColumn("Eredmény (érintett körök)", format="%.0f €")})
 
-    vis = st.selectbox("Viszonylat körei", b["Viszonylat"], index=None, placeholder="Válassz viszonylatot…")
-    if vis:
-        kk = p[p["Viszonylat"] == vis]
-        st.dataframe(kk[["Kör ID", "Hónap", "Reláció", "Megbízók", "Vontatmány", "Kör kezdete dátum",
-                         "Kör vége dátum", "Km", "Bevétel / km", "Fedezet / km", "Eredmény / km",
-                         "Eredmény (szcenárió) / km", "Eredmény"]],
-                     hide_index=True, width="stretch", column_config={
-                         **{c: st.column_config.NumberColumn(format="%.3f") for c in kk.columns if c.endswith("/ km")},
-                         "Km": st.column_config.NumberColumn(format="%.0f"),
-                         "Eredmény": st.column_config.NumberColumn(format="%.0f €"),
-                         "Kör kezdete dátum": st.column_config.DateColumn(format="YYYY.MM.DD"),
-                         "Kör vége dátum": st.column_config.DateColumn(format="YYYY.MM.DD")})
+# --------------------------------------------------------------------------- Vállalkozói összevetés
+with t_vall:
+    v1, v2 = st.columns([1, 2])
+    ar = v1.number_input("Alvállalkozói díj (EUR/km)", 0.50, 3.00, 1.10, 0.01, format="%.2f")
+    fix_marad = v2.radio("Ha kiadjuk, az autó…", ["áll, a fix költség nálunk marad",
+                                                 "máshol hasznosítható (a fix költség nem ezt terheli)"],
+                         horizontal=False) .startswith("áll")
+    st.markdown('<div class="note">Kiadva a kör eredménye: <strong>díj − alvállalkozói díj</strong>. Saját futásnál '
+                + ("a <strong>fedezet</strong> (díj − futással arányos költség), mert a fix költség mindenképp felmerül. "
+                   "Kiadni akkor éri meg, ha az alvállalkozói díj a futással arányos költség/km alatt van."
+                   if fix_marad else
+                   "a <strong>teljes eredmény</strong>, mert az autó máshol termel. Kiadni akkor éri meg, ha az "
+                   "alvállalkozói díj a teljes költség/km (nullszaldós díj) alatt van.")
+                + '</div>', unsafe_allow_html=True)
+    bv = kd.vallalkozoi(kd.besorol(p, alap=alap, min_kor=int(min_kor), elvart=elvart), ar, fix_marad)
+    vk = st.columns(3)
+    jo = bv[bv["Döntés"] == "Kiadni megéri"]
+    kpi(vk[0], "Kiadni megéri", f"{len(jo)} viszonylat", f"{int(jo['Körök'].sum())} kör", dark=True)
+    kpi(vk[1], "Becsült előny, ha ezeket kiadjuk", fmt(jo["Kiadás előnye (EUR)"].sum(), EUR), "a vizsgált időszakban")
+    kpi(vk[2], "Saját autóval jobb", f"{len(bv) - len(jo)} viszonylat")
+    st.write("")
+    vcol = ["Viszonylat", "Döntés", "Kategória", "Körök", "Bevétel / km", "Futással arányos ktg / km",
+            "Fix ktg / km", "Saját futás / km", "Kiadva eredmény / km", "Kiadás előnye / km", "Kiadás előnye (EUR)",
+            "Max. alvállalkozói díj / km"]
+    st.dataframe(bv[vcol], hide_index=True, width="stretch", height=520, column_config={
+        **{c: st.column_config.NumberColumn(format="%.3f") for c in vcol if c.endswith("/ km")},
+        "Bevétel / km": st.column_config.NumberColumn("Díj / km", format="%.3f"),
+        "Saját futás / km": st.column_config.NumberColumn(format="%.3f",
+                                                          help="Fedezet/km vagy eredmény/km a választástól függően"),
+        "Max. alvállalkozói díj / km": st.column_config.NumberColumn(
+            format="%.3f", help="Ennél olcsóbb alvállalkozói díjnál éri meg kiadni"),
+        "Kiadás előnye (EUR)": st.column_config.NumberColumn(format="%.0f €")})
 
 # --------------------------------------------------------------------------- Szcenárió
 with t_szc:
