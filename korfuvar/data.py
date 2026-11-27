@@ -143,7 +143,8 @@ class Adat:
 
 
 def prepare(raw: pd.DataFrame, besorolas: pd.DataFrame, flotta: pd.DataFrame,
-            cel_letszam: dict[str, float] | None = None) -> Adat:
+            cel_letszam: dict[str, float] | None = None, egyszeri_szures: bool = True,
+            egyszeri_szorzo: float = 3.0, egyszeri_min_eur: float = 300.0) -> Adat:
     df = raw.copy()
     start, stop = df.columns.get_loc(ELSO_KTG), df.columns.get_loc(TELJES)
     ktg_cols = list(df.columns[start:stop])
@@ -162,6 +163,19 @@ def prepare(raw: pd.DataFrame, besorolas: pd.DataFrame, flotta: pd.DataFrame,
     for g in sorted(set(csop.values()) - {"Részösszeg (nem számít bele)"}):
         cols = [c for c in ktg_cols if csop.get(c) == g]
         df[f"ktg · {g}"] = df[cols].sum(axis=1)
+
+    # Egyszeri, kiugró karbantartás (pl. nagyjavítás) kiszűrése: ha a kör karbantartása a
+    # medián €/km többszöröse és legalább egyszeri_min_eur-val több, a többletet kivesszük a körből.
+    df["Egyszeri karbantartás (kiszűrve)"] = 0.0
+    if egyszeri_szures and "ktg · Karbantartás" in df:
+        km = pd.to_numeric(df["Km"], errors="coerce")
+        arany = df["ktg · Karbantartás"] / km.where(km > 0)
+        med = arany.median()
+        tobblet = df["ktg · Karbantartás"] - med * km
+        kiugro = (arany > egyszeri_szorzo * med) & (tobblet > egyszeri_min_eur)
+        df.loc[kiugro, "Egyszeri karbantartás (kiszűrve)"] = tobblet[kiugro]
+        df["ktg · Karbantartás"] -= df["Egyszeri karbantartás (kiszűrve)"]
+        df["Futással arányos ktg"] -= df["Egyszeri karbantartás (kiszűrve)"]
 
     df["Státusz"] = df.apply(statusz, axis=1)
     df["Pénzügyi körben"] = df["Státusz"].isin(["Teljes kör", "Részleges / hibás"])

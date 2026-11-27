@@ -145,6 +145,10 @@ with st.expander("Forrásfájlok és beállítások", expanded=False):
     min_kor = c2.number_input("Visszatérő viszonylat: legalább ennyi kör", 2, 20, 3)
     alap = c2.radio("Besorolás alapja", ["Eredmény", "Fedezet", "Eredmény (szcenárió)"], horizontal=True,
                     help="Eredmény = bevétel − teljes költség. Fedezet = bevétel − futással arányos költség.")
+    egyszeri = c2.checkbox("Egyszeri, kiugró karbantartás kiszűrése", value=True,
+                           help="Ha egy kör karbantartási költsége a medián €/km több mint 3-szorosa és legalább "
+                                "300 €-val több annál, a többletet (pl. nagyjavítás) nem terheljük a körre. "
+                                "A kiszűrt tételek az Adatminőség fülön láthatók.")
     sheet_url = c1.text_input("Létszám: „Éves fajlagos fuvarozási mutatók” Google-táblázat hivatkozása",
                               value=secret("flotta_sheet_url", ""),
                               help="Streamlit Cloudon a secrets „flotta_sheet_url” kulcsában tárold, így nem kell beírni.")
@@ -190,7 +194,7 @@ if flotta_hiba:
                f"Ok: {flotta_hiba}")
 elif not sheet_url and not st.session_state.get("flotta_nev") and not len(flotta):
     st.info("Nincs megadva a létszám Google-táblázata (secrets: flotta_sheet_url), és nincs feltöltött létszámfájl.")
-adat = kd.prepare(raw, besorolas, flotta, st.session_state.get("cel"))
+adat = kd.prepare(raw, besorolas, flotta, st.session_state.get("cel"), egyszeri_szures=egyszeri)
 korok = kd.set_viszonylat(adat.korok, szint)
 honapok = sorted(korok["Hónap"].dropna().unique())
 
@@ -213,7 +217,9 @@ if p.empty:
 ossz = kd.osszesit(p.assign(_=1), ["_"]).iloc[0]
 k = st.columns(4)
 kpi(k[0], "Eredmény / km (tény)", fmt(ossz["Eredmény / km"]), dark=True,
-    pill=f"{fmt(ossz['Eredmény'], EUR)} összesen")
+    pill=f"{fmt(ossz['Eredmény'], EUR)} összesen",
+    sub=(f"egyszeri karbantartás nélkül (kiszűrve: {fmt(p['Egyszeri karbantartás (kiszűrve)'].sum(), EUR)})"
+         if p["Egyszeri karbantartás (kiszűrve)"].sum() > 0 else ""))
 kpi(k[1], "Eredmény / km teljes sofőrállománnyal", fmt(ossz["Eredmény (szcenárió) / km"]),
     f"különbség: {fmt(ossz['Eredmény (szcenárió) / km'] - ossz['Eredmény / km'])} · "
     f"{fmt(ossz['Eredmény (szcenárió)'] - ossz['Eredmény'], EUR)}")
@@ -298,20 +304,43 @@ with t_rossz:
     hat_cols = [c for c in o.columns if c.startswith("Hatás: ")]
     cols = ["Kör ID", "Hónap", "Viszonylat", "Eredmény", "Eltérés (EUR)", "Fő okok", "Eredmény / km",
             "bm Eredmény / km", "Bevétel / km", "bm Bevétel / km", "Km", "Napok", "Km / nap", "Rakott km %",
-            "Reláció", "Megbízók", "Vontatmány"] + hat_cols + ["Összehasonlítás"]
+            "Reláció", "Megbízók", "Egyszeri karbantartás (kiszűrve)"] + hat_cols + ["Összehasonlítás"]
+    with st.expander("Oszlopok jelentése"):
+        st.markdown("""
+| Oszlop | Jelentés |
+|---|---|
+| **Eredmény** | A kör eredménye: bevétel − futással arányos költség − fix költség (EUR). Az egyszeri, kiugró karbantartás nélkül, ha a szűrés be van kapcsolva. |
+| **Eltérés az átlagtól** | Mennyivel rosszabb (−) vagy jobb (+) a kör, mint egy átlagos kör ugyanezen a viszonylaton, ugyanennyi km-re vetítve (EUR). |
+| **Fő okok** | A legnagyobb negatív tételek euróban, plusz jelzések: hosszú kör (≥30%-kal több nap), lassú (≥20%-kal kevesebb km/nap), sok üres km (rakott arány ≥5 százalékponttal kisebb), rövid kör (<60% km). |
+| **Eredmény / km**, **(átlag)** | A kör, illetve a viszonylat többi körének eredménye EUR/km-ben. |
+| **Díj / km**, **(átlag)** | A kör fuvardíja (bevétele) EUR/km-ben, és ugyanez a viszonylat többi körére. |
+| **Km**, **Napok**, **Km / nap** | Menetlevél szerinti km, napok száma és napi átlagos futás. |
+| **Rakott km %** | A megtett km rakottan futott aránya; minél kisebb, annál több az üres futás. |
+| **Reláció**, **Megbízók** | A kör országsorrendje és a megbízók. |
+| **Egyszeri karbantartás (kiszűrve)** | A körből kivett kiugró karbantartási többlet (EUR); nem rontja az eredményt. |
+| **Hatás · Díj** | (Díj/km − átlagos díj/km) × km. Negatív: alacsonyabb díjon ment, mint az átlag. |
+| **Hatás · Üzemanyag, Útdíj, Sofőrbér, Karbantartás, Egyéb futás** | (Átlagos költség/km − a kör költsége/km) × km. Negatív: ez a tétel drágább volt az átlagnál. |
+| **Hatás · Fix költség** | Ugyanez a fix költségre. Negatív általában azt jelenti, hogy az autó abban a hónapban keveset futott, így a havi fix költsége kevés km-re oszlott. |
+| **Összehasonlítás** | Mihez hasonlítunk: a viszonylat többi köréhez, vagy ha abból kevés van, az összes kör átlagához. |
+""")
     st.dataframe(top[cols], hide_index=True, width="stretch", height=420, column_config={
         "Km": st.column_config.NumberColumn(format="%.0f"),
         "Napok": st.column_config.NumberColumn(format="%.0f"),
         "Km / nap": st.column_config.NumberColumn(format="%.0f"),
-        "Rakott km %": st.column_config.NumberColumn(format="%.0f%%"),
-        "Bevétel / km": st.column_config.NumberColumn("Díj / km", format="%.3f"),
-        "bm Bevétel / km": st.column_config.NumberColumn("Díj / km (átlag)", format="%.3f"),
+        "Rakott km %": st.column_config.NumberColumn(format="%.0f%%", help="Rakott km a menetlevél km arányában"),
+        "Bevétel / km": st.column_config.NumberColumn("Díj / km", format="%.3f", help="A kör fuvardíja EUR/km"),
+        "bm Bevétel / km": st.column_config.NumberColumn("Díj / km (átlag)", format="%.3f",
+                                                         help="A viszonylat többi körének díja EUR/km"),
         "Eredmény / km": st.column_config.NumberColumn(format="%.3f"),
         "bm Eredmény / km": st.column_config.NumberColumn("Eredmény / km (átlag)", format="%.3f"),
-        "Eredmény": st.column_config.NumberColumn(format="%.0f €"),
-        "Eltérés (EUR)": st.column_config.NumberColumn("Eltérés az átlagtól", format="%.0f €"),
+        "Eredmény": st.column_config.NumberColumn(format="%.0f €", help="Bevétel − futással arányos − fix költség"),
+        "Eltérés (EUR)": st.column_config.NumberColumn("Eltérés az átlagtól", format="%.0f €",
+                                                       help="A kör eredménye − átlagos kör eredménye ugyanennyi km-re"),
         "Fő okok": st.column_config.TextColumn(width="large"),
-        **{c: st.column_config.NumberColumn(c.replace("Hatás: ", "Hatás · "), format="%.0f €") for c in hat_cols}})
+        "Egyszeri karbantartás (kiszűrve)": st.column_config.NumberColumn(format="%.0f €"),
+        **{c: st.column_config.NumberColumn(c.replace("Hatás: ", "Hatás · "), format="%.0f €",
+                                            help="Negatív: ennyivel rontotta az eredményt az átlaghoz képest")
+           for c in hat_cols}})
 
     kor_id = st.selectbox("Kör részletei", top["Kör ID"], index=None, placeholder="Válassz kört…",
                           format_func=lambda i: f"{i} · {top.set_index('Kör ID').at[i, 'Viszonylat']} · "
@@ -526,6 +555,16 @@ with t_adat:
     c2.dataframe(besorolas, hide_index=True, width="stretch", height=360)
     if adat.besorolatlan:
         c2.warning("Besorolás nélküli költségoszlop (fixként számolva): " + ", ".join(adat.besorolatlan))
+    st.markdown("#### Kiszűrt egyszeri karbantartás")
+    ek = korok[korok["Egyszeri karbantartás (kiszűrve)"] > 0][
+        ["Kör ID", "Hónap", "Viszonylat", "Vontatmány", "Km", "Egyszeri karbantartás (kiszűrve)", "ktg · Karbantartás"]]
+    if len(ek):
+        st.dataframe(ek, hide_index=True, width="stretch", column_config={
+            "Km": st.column_config.NumberColumn(format="%.0f"),
+            "Egyszeri karbantartás (kiszűrve)": st.column_config.NumberColumn(format="%.0f €"),
+            "ktg · Karbantartás": st.column_config.NumberColumn("Bent hagyott karbantartás", format="%.0f €")})
+    else:
+        st.caption("Nincs kiszűrt tétel (vagy a szűrés ki van kapcsolva).")
     st.markdown("#### Kizárt körök")
     kiz = korok[~korok["Pénzügyi körben"]][["Kör ID", "Hónap", "Státusz", "Reláció", "Megbízók", "Magyarázat"]]
     st.dataframe(kiz, hide_index=True, width="stretch", height=320)
