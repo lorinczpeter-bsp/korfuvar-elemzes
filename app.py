@@ -148,6 +148,7 @@ with st.expander("Forrásfájlok és beállítások", expanded=False):
     feltoltott = c1.file_uploader("Körfuvar-fájlok (korfuvarok_ÉÉÉÉ_HH.xlsx)", type="xlsx",
                                   accept_multiple_files=True,
                                   help="Ha nem töltesz fel semmit, a data/ mappában lévő fájlokat használja.")
+    c1.caption("Forrás: a körfuvar-fájlokat egyelőre Gyarmati Viktor küldi.")
     szint = c2.selectbox("Viszonylat = ", list(kd.VISZONYLAT_SZINTEK), index=0,
                          help="Export célállomás: a kifelé lerakó telephely, bármilyen import jön is vissza.")
     min_kor = c2.number_input("Visszatérő viszonylat: legalább ennyi kör", 2, 20, 3)
@@ -168,6 +169,7 @@ with st.expander("Forrásfájlok és beállítások", expanded=False):
                                     help="Fuvarszám, fuvarfeladat típusa és vállalási díj. Ebből számolja a körök "
                                          "export szakaszának díját (Vállalkozói összevetés). Több hónap egyszerre is "
                                          "feltölthető; a hónap eleji körök miatt az előző hónap vége is kell.")
+    c1.caption("Forrás: InnoTMS, a „09-24-08 Sped – Új fuvarfeladat – Fuvarnapló” oldalról tölthető le.")
     flotta_fajl = c1.file_uploader("Tartalék: havi létszám CSV (ha a Google-táblázat nem érhető el)", type="csv",
                                    help="Formátum: config/flotta_minta.csv. A Szcenárió fülön kézzel is kitölthető.")
     st.caption("Költségbesorolás (fix / futással arányos): config/koltseg_besorolas.csv. "
