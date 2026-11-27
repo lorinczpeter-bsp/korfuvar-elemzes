@@ -111,7 +111,7 @@ def secret(kulcs, alap=None):
         return alap
 
 
-@st.cache_data(ttl=3600, show_spinner="Létszámadatok lekérése a Google-táblázatból…")
+@st.cache_data(ttl=600, show_spinner="Létszámadatok lekérése a Google-táblázatból…")
 def flotta_google(url: str, evek: tuple[int, ...], creds: tuple | None) -> pd.DataFrame:
     return sheets.load_flotta_google(url, list(evek), dict(creds) if creds else None)
 
@@ -171,6 +171,13 @@ if flotta_fajl is not None and st.session_state.get("flotta_nev") != flotta_fajl
     st.session_state["flotta"] = kd.load_flotta(flotta_fajl.getvalue())
     st.session_state["flotta_nev"] = flotta_fajl.name
     st.session_state["flotta_forras"] = f"feltöltött fájl ({flotta_fajl.name})"
+
+# Minden új oldalbetöltéskor (új munkamenet) friss létszám a Google-táblázatból
+if "flotta_munkamenet" not in st.session_state:
+    st.session_state["flotta_munkamenet"] = True
+    flotta_google.clear()
+    if not st.session_state.get("flotta_nev"):
+        st.session_state.pop("flotta", None)
 
 flotta_hiba = None
 flotta = st.session_state.get("flotta")
