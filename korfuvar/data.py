@@ -55,15 +55,52 @@ def load_flotta(src=None) -> pd.DataFrame:
 
 
 # --------------------------------------------------------------------------- segédek
-_REGIO = re.compile(r"^\s*([A-Za-z]{2})[\s\-]*(?:[A-Za-z]{1,2}-)?(\d{2})")
+_CIM = re.compile(r"^\s*([A-Za-z]{1,2})[\s\-]*(?:[A-Za-z]{1,2}-)?(\d{4,5})\s*(?:[A-Z]{2}\s)?\s*(.*)$")
+_ORSZAG_ALIAS = {"D": "DE", "F": "FR", "I": "IT", "A": "AT", "B": "BE", "L": "LU", "H": "HU"}
+_KOTOSZO = {"am", "an", "bei", "der", "im", "in", "de", "di", "la", "le", "les", "en", "sur", "sous",
+            "del", "della", "d'", "aan", "den", "op", "sul"}
+
+
+def _cim_reszek(cim):
+    if not isinstance(cim, str):
+        return None
+    m = _CIM.match(cim)
+    if not m:
+        return None
+    orszag = m.group(1).upper()
+    orszag = _ORSZAG_ALIAS.get(orszag, orszag)
+    szavak = re.split(r"[\s,]+", m.group(3).strip())
+    varos = []
+    for i, w in enumerate(szavak):
+        if not w:
+            continue
+        elozo = varos[-1] if varos else ""
+        if (i == 0 or w.lower() in _KOTOSZO or elozo.lower() in _KOTOSZO
+                or (i == 1 and len(elozo) <= 4) or w[:1].islower() and "'" in w):
+            varos.append(w)
+        else:
+            break
+    return orszag, m.group(2), " ".join(varos)
 
 
 def regio(cim) -> str | None:
     """'FR 56500 Naizin …' -> 'FR56'; 'AT-4550 …' -> 'AT45'."""
-    if not isinstance(cim, str):
-        return None
-    m = _REGIO.match(cim)
-    return (m.group(1).upper() + m.group(2)) if m else None
+    r = _cim_reszek(cim)
+    return f"{r[0]}{r[1][:2]}" if r else None
+
+
+def telephely(cim) -> str | None:
+    """'DE 65203 Wiesbaden Kasteler Straße' -> 'DE 65203 Wiesbaden'."""
+    r = _cim_reszek(cim)
+    return f"{r[0]} {r[1]} {r[2]}".strip() if r else None
+
+
+VISZONYLAT_SZINTEK = {
+    "Export célállomás (település)": "Export cél",
+    "Export cél régió (irsz. 2 jegy)": "Export cél régió",
+    "Export célország": "Célország",
+    "Régiópár (ki → be)": "Régiópár",
+}
 
 
 def honap_fajlnevbol(nev: str) -> str | None:
@@ -133,7 +170,12 @@ def prepare(raw: pd.DataFrame, besorolas: pd.DataFrame, flotta: pd.DataFrame,
     ki = df["Kifelé záró cím"].map(regio).fillna(df["Nemzetközi (semleges) kezdő cím"].map(regio))
     be = df["Befelé kezdő cím"].map(regio).fillna(df["Nemzetközi (semleges) záró cím"].map(regio))
     df["Kifelé régió"], df["Befelé régió"] = ki, be
-    df["Viszonylat"] = ki.fillna("–") + " → " + be.fillna("–")
+    df["Régiópár"] = ki.fillna("–") + " → " + be.fillna("–")
+    # Export célállomás: a kifelé (export) lerakó telephely, a visszfuvartól függetlenül
+    df["Export cél"] = df["Kifelé záró cím"].map(telephely) \
+        .fillna(df["Nemzetközi (semleges) kezdő cím"].map(telephely)).fillna("– (nincs export)")
+    df["Export cél régió"] = ki.fillna("– (nincs export)")
+    df["Viszonylat"] = df["Export cél"]
 
     # Eredmények
     df["Fedezet"] = df[BEVETEL] - df["Futással arányos ktg"]
@@ -168,7 +210,8 @@ def load(paths_or_files, besorolas=None, flotta=None, cel_letszam=None) -> Adat:
 
 
 # --------------------------------------------------------------------------- aggregálás
-def osszesit(df: pd.DataFrame, by: list[str]) -> pd.DataFrame:
+def osszesit(df: pd.DataFrame, by: list[str], elvart: float = 0.0) -> pd.DataFrame:
+    """elvart: elvárt árbevétel-arányos eredmény (0,05 = 5%)."""
     g = df.groupby(by, dropna=False)
     out = g.agg(**{
         "Körök": ("Kör ID", "size"),
@@ -185,15 +228,26 @@ def osszesit(df: pd.DataFrame, by: list[str]) -> pd.DataFrame:
     for c in ["Bevétel", "Futással arányos ktg", "Fix ktg", "Fix ktg (szcenárió)",
               "Fedezet", "Eredmény", "Eredmény (szcenárió)"]:
         out[f"{c} / km"] = out[c] / out["Km"].where(out["Km"] > 0)
+    # Nullszaldós díj: az a fajlagos díj, amelynél az eredmény 0 (= teljes költség / km)
+    out["Nullszaldós díj / km"] = out["Futással arányos ktg / km"] + out["Fix ktg / km"]
+    out["Nullszaldós díj / km (szcenárió)"] = out["Futással arányos ktg / km"] + out["Fix ktg (szcenárió) / km"]
+    # Szükséges díj az elvárt árbevétel-arányos eredményhez: díj × (1 − elvárt) = költség/km
+    out["Szükséges díj / km"] = out["Nullszaldós díj / km"] / (1 - elvart)
+    out["Szükséges díj / km (szcenárió)"] = out["Nullszaldós díj / km (szcenárió)"] / (1 - elvart)
+    out["Hiányzó díj / km"] = (out["Szükséges díj / km"] - out["Bevétel / km"]).clip(lower=0)
+    out["Hiányzó díj / km (szcenárió)"] = (out["Szükséges díj / km (szcenárió)"] - out["Bevétel / km"]).clip(lower=0)
+    out["Szükséges díjemelés %"] = out["Hiányzó díj / km"] / out["Bevétel / km"] * 100
+    out["Árbevétel-arányos eredmény %"] = out["Eredmény"] / out["Bevétel"] * 100
     return out.reset_index()
 
 
-def besorol(df: pd.DataFrame, alap: str = "Eredmény", min_kor: int = 3) -> pd.DataFrame:
+def besorol(df: pd.DataFrame, alap: str = "Eredmény", min_kor: int = 3, elvart: float = 0.0) -> pd.DataFrame:
     """Visszatérő viszonylatok besorolása a negatív körök aránya szerint.
 
     alap: 'Eredmény' | 'Fedezet' | 'Eredmény (szcenárió)'
     """
-    agg = osszesit(df, ["Viszonylat"])
+    df = df[~df["Viszonylat"].astype(str).str.startswith("–")]
+    agg = osszesit(df, ["Viszonylat"], elvart)
     neg = df.assign(_neg=df[alap] < 0).groupby("Viszonylat")["_neg"].mean()
     agg["Negatív körök %"] = agg["Viszonylat"].map(neg) * 100
     fedezet_neg = df.assign(_n=df["Fedezet"] < 0).groupby("Viszonylat")["_n"].mean()
@@ -221,3 +275,106 @@ def besorol(df: pd.DataFrame, alap: str = "Eredmény", min_kor: int = 3) -> pd.D
 
     agg["Javaslat"] = agg.apply(javaslat, axis=1)
     return agg.sort_values(["Kategória", "Eredmény / km"]).reset_index(drop=True)
+
+
+def set_viszonylat(df: pd.DataFrame, szint: str) -> pd.DataFrame:
+    df = df.copy()
+    df["Viszonylat"] = df[VISZONYLAT_SZINTEK.get(szint, "Export cél")].fillna("–")
+    return df
+
+
+# --------------------------------------------------------------------------- eltérés-okok
+OK_MUTATOK = [  # (oszlop, név, egység, "magas rossz?")
+    ("Km", "Km", "km", None),
+    ("Napok", "Időtartam", "nap", True),
+    ("Km / nap", "Km / nap", "km", False),
+    ("Rakott km %", "Rakott km", "%", False),
+    ("Tankolás l/100km", "Fogyasztás", "l/100km", True),
+]
+OK_KTG = [  # (oszlop, név)
+    ("ktg · Üzemanyag", "Üzemanyag"),
+    ("ktg · Útdíj", "Útdíj"),
+    ("ktg · Sofőrbér és napidíj", "Sofőrbér, napidíj"),
+    ("ktg · Karbantartás", "Karbantartás"),
+    ("ktg · Egyéb futás", "Egyéb futás"),
+    ("Fix ktg", "Fix költség"),
+]
+
+
+def _kiegeszit(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df["Napok"] = pd.to_numeric(df["Menetlevél ∑ nap"], errors="coerce").where(lambda x: x > 0)
+    df["Km / nap"] = df["Km"] / df["Napok"]
+    df["Tankolás l/100km"] = pd.to_numeric(df.get("Menetlevél tankolás / 100 km"), errors="coerce")
+    df["Eredmény / nap"] = df["Eredmény"] / df["Napok"]
+    return df
+
+
+def benchmark(df: pd.DataFrame, min_kor: int = 3) -> pd.DataFrame:
+    """Minden körhöz összehasonlítási alap: a viszonylat többi körének km-súlyozott átlaga
+    (ha legalább min_kor-1 másik kör van), különben a kiválasztott összes kör átlaga."""
+    df = _kiegeszit(df)
+    sum_cols = ["Km", "Bevétel", "Napok"] + [c for c, _ in OK_KTG]
+    tot = df[sum_cols].sum()
+    grp = df.groupby("Viszonylat")[sum_cols].transform("sum")
+    n = df.groupby("Viszonylat")["Kör ID"].transform("size")
+    sajat = (n - 1) >= max(min_kor - 1, 1)
+    # a kör saját magát kihagyja a viszonylat-átlagból
+    alap = (grp - df[sum_cols]).where(sajat, other=pd.DataFrame([tot] * len(df), index=df.index))
+    out = pd.DataFrame(index=df.index)
+    out["Összehasonlítás"] = np.where(sajat, "viszonylat (" + (n - 1).astype(str) + " másik kör)",
+                                      "összes kör (kevés azonos viszonylatú)")
+    km = alap["Km"]
+    out["bm Bevétel / km"] = alap["Bevétel"] / km
+    for c, _ in OK_KTG:
+        out[f"bm {c} / km"] = alap[c] / km
+    out["bm Napok"] = np.where(sajat, alap["Napok"] / (n - 1).where(n > 1), tot["Napok"] / len(df))
+    out["bm Km"] = np.where(sajat, km / (n - 1).where(n > 1), tot["Km"] / len(df))
+    out["bm Km / nap"] = alap["Km"] / alap["Napok"]
+    for c in ["Rakott km %", "Tankolás l/100km"]:
+        w = df["Km"]
+        if sajat.any():
+            g_num = (df[c] * w).groupby(df["Viszonylat"]).transform("sum") - df[c].fillna(0) * w
+            g_den = w.where(df[c].notna(), 0).groupby(df["Viszonylat"]).transform("sum") - w.where(df[c].notna(), 0)
+            v = g_num / g_den
+        else:
+            v = pd.Series(np.nan, index=df.index)
+        osszes = (df[c] * w).sum() / w.where(df[c].notna(), 0).sum()
+        out[f"bm {c}"] = v.where(sajat, osszes)
+    return pd.concat([df, out], axis=1)
+
+
+def okok(df: pd.DataFrame, min_kor: int = 3) -> pd.DataFrame:
+    """Körönként az eredmény eltérésének felbontása (EUR) a benchmarkhoz képest."""
+    b = benchmark(df, min_kor)
+    b["Hatás: Díj"] = (b["Bevétel"] / b["Km"] - b["bm Bevétel / km"]) * b["Km"]
+    for c, nev in OK_KTG:
+        b[f"Hatás: {nev}"] = -(b[c] / b["Km"] - b[f"bm {c} / km"]) * b["Km"]
+    b["bm Eredmény / km"] = b["bm Bevétel / km"] - sum(b[f"bm {c} / km"] for c, _ in OK_KTG)
+    b["Eltérés (EUR)"] = (b["Eredmény / km"] - b["bm Eredmény / km"]) * b["Km"]
+
+    def szoveg(r):
+        hat = {"Díj": r["Hatás: Díj"], **{n: r[f"Hatás: {n}"] for _, n in OK_KTG}}
+        rossz = sorted([(v, k) for k, v in hat.items() if v < -20], key=lambda x: x[0])[:3]
+        t = []
+        for v, k in rossz:
+            if k == "Díj":
+                t.append(f"alacsony díj {r['Bevétel / km']:.2f} vs {r['bm Bevétel / km']:.2f} €/km ({v:,.0f} €)")
+            elif k == "Fix költség":
+                t.append(f"magas fix ktg/km {r['Fix ktg / km']:.2f} vs {r['bm Fix ktg / km']:.2f} – "
+                         f"az autó keveset futott a hónapban ({v:,.0f} €)")
+            else:
+                col = [c for c, n in OK_KTG if n == k][0]
+                t.append(f"magas {k.lower()} {r[col] / r['Km']:.2f} vs {r[f'bm {col} / km']:.2f} €/km ({v:,.0f} €)")
+        if pd.notna(r["Napok"]) and pd.notna(r["bm Napok"]) and r["Napok"] >= r["bm Napok"] * 1.3 and r["Napok"] - r["bm Napok"] >= 1:
+            t.append(f"hosszú kör: {r['Napok']:.0f} vs {r['bm Napok']:.1f} nap")
+        if pd.notna(r["Km / nap"]) and pd.notna(r["bm Km / nap"]) and r["Km / nap"] < r["bm Km / nap"] * 0.8:
+            t.append(f"lassú: {r['Km / nap']:.0f} vs {r['bm Km / nap']:.0f} km/nap")
+        if pd.notna(r["Rakott km %"]) and pd.notna(r["bm Rakott km %"]) and r["Rakott km %"] < r["bm Rakott km %"] - 5:
+            t.append(f"sok üres km: rakott {r['Rakott km %']:.0f}% vs {r['bm Rakott km %']:.0f}%")
+        if r["Km"] < 0.6 * r["bm Km"]:
+            t.append(f"rövid kör: {r['Km']:,.0f} vs {r['bm Km']:,.0f} km")
+        return "; ".join(t).replace(",", " ").replace(".", ",") if t else "nincs kiugró eltérés"
+
+    b["Fő okok"] = b.apply(szoveg, axis=1)
+    return b

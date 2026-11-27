@@ -11,6 +11,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from korfuvar import data as kd
+from korfuvar import sheets
 
 ROOT = Path(__file__).parent
 NAVY, YELLOW, BG, BORDER, MUTED = "#2A3756", "#F2E47D", "#F4F5F8", "#E3E6EC", "#5B6475"
@@ -103,6 +104,18 @@ def style_fig(fig, h=380):
 
 
 # --------------------------------------------------------------------------- adatok
+def secret(kulcs, alap=None):
+    try:
+        return st.secrets.get(kulcs, alap)
+    except Exception:  # nincs secrets.toml
+        return alap
+
+
+@st.cache_data(ttl=3600, show_spinner="Létszámadatok lekérése a Google-táblázatból…")
+def flotta_google(url: str, evek: tuple[int, ...], creds: tuple | None) -> pd.DataFrame:
+    return sheets.load_flotta_google(url, list(evek), dict(creds) if creds else None)
+
+
 @st.cache_data(show_spinner="Körfuvarok betöltése…")
 def betolt(files: tuple[tuple[str, bytes], ...]) -> pd.DataFrame:
     frames = [kd.read_korfuvar_file(b, nev) for nev, b in files]
@@ -127,13 +140,19 @@ with st.expander("Forrásfájlok és beállítások", expanded=False):
     feltoltott = c1.file_uploader("Körfuvar-fájlok (korfuvarok_ÉÉÉÉ_HH.xlsx)", type="xlsx",
                                   accept_multiple_files=True,
                                   help="Ha nem töltesz fel semmit, a data/ mappában lévő fájlokat használja.")
+    szint = c2.selectbox("Viszonylat = ", list(kd.VISZONYLAT_SZINTEK), index=0,
+                         help="Export célállomás: a kifelé lerakó telephely, bármilyen import jön is vissza.")
     min_kor = c2.number_input("Visszatérő viszonylat: legalább ennyi kör", 2, 20, 3)
     alap = c2.radio("Besorolás alapja", ["Eredmény", "Fedezet", "Eredmény (szcenárió)"], horizontal=True,
                     help="Eredmény = bevétel − teljes költség. Fedezet = bevétel − futással arányos költség.")
-    flotta_fajl = c1.file_uploader("Havi létszám (flotta_ÉÉÉÉ.csv, pontosvesszős)", type="csv",
-                                   help="Oszlopok: honap;nemz_gjmu;nemz_gkv;atl_ledolg_nap;km_per_ledolg_nap;"
-                                        "szabadsag_nap;tappenz_nap. Ha nincs, a config/ mappából olvas, "
-                                        "vagy a Szcenárió fülön kézzel is kitölthető.")
+    sheet_url = c1.text_input("Létszám: „Éves fajlagos fuvarozási mutatók” Google-táblázat hivatkozása",
+                              value=secret("flotta_sheet_url", ""),
+                              help="Streamlit Cloudon a secrets „flotta_sheet_url” kulcsában tárold, így nem kell beírni.")
+    if c1.button("Létszám frissítése a Google-táblázatból"):
+        flotta_google.clear()
+        st.session_state.pop("flotta", None)
+    flotta_fajl = c1.file_uploader("Tartalék: havi létszám CSV (ha a Google-táblázat nem érhető el)", type="csv",
+                                   help="Formátum: config/flotta_minta.csv. A Szcenárió fülön kézzel is kitölthető.")
     st.caption("Költségbesorolás (fix / futással arányos): config/koltseg_besorolas.csv. "
                "A havi létszám és a cél-sofőrszám a Szcenárió fülön is állítható.")
 
@@ -147,17 +166,42 @@ besorolas = kd.load_besorolas()
 if flotta_fajl is not None and st.session_state.get("flotta_nev") != flotta_fajl.name:
     st.session_state["flotta"] = kd.load_flotta(flotta_fajl.getvalue())
     st.session_state["flotta_nev"] = flotta_fajl.name
+    st.session_state["flotta_forras"] = f"feltöltött fájl ({flotta_fajl.name})"
+
+flotta_hiba = None
 flotta = st.session_state.get("flotta")
 if flotta is None:
-    flotta = kd.load_flotta()
+    evek = tuple(sorted({int(h[:4]) for h in raw["Hónap"].dropna().astype(str) if h[:4].isdigit()}))
+    if sheet_url:
+        try:
+            creds = secret("google_service_account")
+            flotta = flotta_google(sheet_url, evek, tuple(dict(creds).items()) if creds else None)
+            st.session_state["flotta_forras"] = (
+                f"Google-táblázat ({', '.join(map(str, evek))}), lekérve: {pd.Timestamp.now(tz='Europe/Budapest'):%Y.%m.%d. %H:%M}")
+        except Exception as e:  # noqa: BLE001 – bármilyen hiba esetén jelzünk és tartalékra váltunk
+            flotta_hiba = f"{type(e).__name__}: {e}"[:300]
+    if flotta is None:
+        flotta = kd.load_flotta()
+        st.session_state["flotta_forras"] = ("config/ mappa" if len(flotta) else "nincs létszámadat")
+    st.session_state["flotta"] = flotta
+if flotta_hiba:
+    st.warning(f"**A létszám Google-táblázata most nem érhető el**, ezért "
+               f"{'a config/ mappában lévő fájlt használom' if len(flotta) else 'nincs létszámadat (a szcenárió nem módosít)'}. "
+               f"Ok: {flotta_hiba}")
+elif not sheet_url and not st.session_state.get("flotta_nev") and not len(flotta):
+    st.info("Nincs megadva a létszám Google-táblázata (secrets: flotta_sheet_url), és nincs feltöltött létszámfájl.")
 adat = kd.prepare(raw, besorolas, flotta, st.session_state.get("cel"))
-korok = adat.korok
+korok = kd.set_viszonylat(adat.korok, szint)
 honapok = sorted(korok["Hónap"].dropna().unique())
 
-f1, f2 = st.columns([3, 1])
+f1, f2, f3 = st.columns([3, 1, 1])
 valasztott = f1.multiselect("Hónapok", honapok, default=honapok)
 orszagok = sorted(korok["Célország"].dropna().unique())
 orszag = f2.multiselect("Célország", orszagok, placeholder="Mind")
+elvart_pct = f3.number_input("Elvárt eredmény (% árbevétel)", 0.0, 30.0, 0.0, 0.5, format="%.1f",
+                             help="0 = nullszaldó. Pl. 5 esetén azt a díjat számolja, amellyel az eredmény "
+                                  "az árbevétel 5%-a lett volna.")
+elvart = elvart_pct / 100
 
 p = korok[korok["Pénzügyi körben"] & korok["Hónap"].isin(valasztott)]
 if orszag:
@@ -179,12 +223,13 @@ kpi(k[3], "Értékelt körök", f"{int(ossz['Körök'])}",
     f"{fmt(ossz['Km'], '{:,.0f} km')} · {len(korok) - len(korok[korok['Pénzügyi körben']])} kör kizárva (Adatminőség fül)")
 st.write("")
 
-t_att, t_visz, t_szc, t_kor, t_adat = st.tabs(
-    ["Áttekintés", "Viszonylatok", "Szcenárió: teljes sofőrállomány", "Körök", "Adatminőség"])
+t_att, t_rossz, t_visz, t_szc, t_lsz, t_kor, t_adat = st.tabs(
+    ["Áttekintés", "Legrosszabb körök", "Viszonylatok", "Szcenárió: teljes sofőrállomány", "Létszám", "Körök",
+     "Adatminőség"])
 
 # --------------------------------------------------------------------------- Áttekintés
 with t_att:
-    h = kd.osszesit(p, ["Hónap"])
+    h = kd.osszesit(p, ["Hónap"], elvart)
     c1, c2 = st.columns([3, 2])
     fig = go.Figure()
     fig.add_bar(x=h["Hónap"], y=h["Futással arányos ktg / km"], name="Futással arányos ktg", marker_color="#7E93C9")
@@ -193,7 +238,7 @@ with t_att:
                     line=dict(color="#B54708", width=3), text=[fmt(v, "{:.3f}") for v in h["Bevétel / km"]],
                     textposition="top center", textfont=dict(color="#B54708"))
     fig.add_scatter(x=h["Hónap"], y=h["Futással arányos ktg / km"] + h["Fix ktg (szcenárió) / km"],
-                    name="Összköltség teljes sofőrállománnyal", mode="markers",
+                    name="Nullszaldós díj teljes sofőrállománnyal", mode="markers",
                     marker=dict(symbol="line-ew", size=70, line=dict(width=4, color="#C9A400")))
     fig.update_layout(barmode="stack", title="Havi fajlagos bevétel és költség (EUR/km)",
                       yaxis_range=[0, max(h["Bevétel / km"].max(), (h["Futással arányos ktg / km"] + h["Fix ktg / km"]).max()) * 1.15])
@@ -208,6 +253,25 @@ with t_att:
     fig2.update_layout(showlegend=False, yaxis_title=None, xaxis_title=None)
     c2.plotly_chart(style_fig(fig2, 420), width="stretch")
 
+    st.markdown(f"#### Díjszint és szükséges díj havonta (elvárt eredmény: {elvart_pct:.1f}%)".replace(".", ","))
+    st.caption("Nullszaldós díj = teljes költség / km. Szükséges díj = nullszaldós díj / (1 − elvárt eredmény %): "
+               "ennyi fajlagos díj kellett volna az elvárt árbevétel-arányos eredményhez. Ha a tényleges díj "
+               "magasabb volt, nincs hiány.")
+    nsz = h[["Hónap", "Bevétel / km", "Árbevétel-arányos eredmény %", "Nullszaldós díj / km",
+             "Szükséges díj / km", "Hiányzó díj / km", "Szükséges díjemelés %",
+             "Szükséges díj / km (szcenárió)", "Hiányzó díj / km (szcenárió)"]].copy()
+    st.dataframe(nsz, hide_index=True, width="stretch", column_config={
+        "Bevétel / km": st.column_config.NumberColumn("Tényleges díj €/km", format="%.3f"),
+        "Nullszaldós díj / km": st.column_config.NumberColumn("Nullszaldós díj €/km", format="%.3f"),
+        "Hiányzó díj / km": st.column_config.NumberColumn("Hiányzó €/km", format="%.3f"),
+        "Szükséges díjemelés %": st.column_config.NumberColumn("Szükséges emelés", format="%.1f%%"),
+        "Árbevétel-arányos eredmény %": st.column_config.NumberColumn("Tény eredmény %", format="%.1f%%"),
+        "Szükséges díj / km": st.column_config.NumberColumn("Szükséges díj €/km", format="%.3f"),
+        "Szükséges díj / km (szcenárió)": st.column_config.NumberColumn(
+            "Szükséges díj €/km teljes sofőrállománnyal", format="%.3f"),
+        "Hiányzó díj / km (szcenárió)": st.column_config.NumberColumn(
+            "Hiányzó €/km teljes sofőrállománnyal", format="%.3f")})
+    st.markdown("#### Havi részletek")
     tabla = h[["Hónap", "Körök", "Km", "Bevétel / km", "Futással arányos ktg / km", "Fix ktg / km",
                "Fedezet / km", "Eredmény / km", "Fix ktg (szcenárió) / km", "Eredmény (szcenárió) / km",
                "Eredmény", "Eredmény (szcenárió)"]]
@@ -217,11 +281,74 @@ with t_att:
         "Eredmény": st.column_config.NumberColumn(format="%.0f €"),
         "Eredmény (szcenárió)": st.column_config.NumberColumn(format="%.0f €")})
 
+# --------------------------------------------------------------------------- Legrosszabb körök
+with t_rossz:
+    o = kd.okok(p, min_kor=int(min_kor))
+    r1, r2 = st.columns([1, 2])
+    n_db = r1.number_input("Hány kör", 5, 50, 10)
+    rang = r2.radio("Rangsor", ["Eredmény (EUR)", "Eredmény / km", "Eltérés a viszonylat átlagától (EUR)"],
+                    horizontal=True)
+    rcol = {"Eredmény (EUR)": "Eredmény", "Eredmény / km": "Eredmény / km",
+            "Eltérés a viszonylat átlagától (EUR)": "Eltérés (EUR)"}[rang]
+    top = o.nsmallest(int(n_db), rcol)
+    st.markdown('<div class="note">Minden kört a <strong>saját viszonylata többi körének</strong> km-súlyozott '
+                'átlagához hasonlít (ha kevés az azonos viszonylatú kör, az összes kör átlagához). '
+                'A hatás oszlopok megmutatják, hány euróval rontotta (−) vagy javította (+) az eredményt az adott '
+                'tétel az átlaghoz képest. Összegük = eltérés az átlagtól.</div>', unsafe_allow_html=True)
+    hat_cols = [c for c in o.columns if c.startswith("Hatás: ")]
+    cols = ["Kör ID", "Hónap", "Viszonylat", "Eredmény", "Eltérés (EUR)", "Fő okok", "Eredmény / km",
+            "bm Eredmény / km", "Bevétel / km", "bm Bevétel / km", "Km", "Napok", "Km / nap", "Rakott km %",
+            "Reláció", "Megbízók", "Vontatmány"] + hat_cols + ["Összehasonlítás"]
+    st.dataframe(top[cols], hide_index=True, width="stretch", height=420, column_config={
+        "Km": st.column_config.NumberColumn(format="%.0f"),
+        "Napok": st.column_config.NumberColumn(format="%.0f"),
+        "Km / nap": st.column_config.NumberColumn(format="%.0f"),
+        "Rakott km %": st.column_config.NumberColumn(format="%.0f%%"),
+        "Bevétel / km": st.column_config.NumberColumn("Díj / km", format="%.3f"),
+        "bm Bevétel / km": st.column_config.NumberColumn("Díj / km (átlag)", format="%.3f"),
+        "Eredmény / km": st.column_config.NumberColumn(format="%.3f"),
+        "bm Eredmény / km": st.column_config.NumberColumn("Eredmény / km (átlag)", format="%.3f"),
+        "Eredmény": st.column_config.NumberColumn(format="%.0f €"),
+        "Eltérés (EUR)": st.column_config.NumberColumn("Eltérés az átlagtól", format="%.0f €"),
+        "Fő okok": st.column_config.TextColumn(width="large"),
+        **{c: st.column_config.NumberColumn(c.replace("Hatás: ", "Hatás · "), format="%.0f €") for c in hat_cols}})
+
+    kor_id = st.selectbox("Kör részletei", top["Kör ID"], index=None, placeholder="Válassz kört…",
+                          format_func=lambda i: f"{i} · {top.set_index('Kör ID').at[i, 'Viszonylat']} · "
+                                                f"{fmt(top.set_index('Kör ID').at[i, 'Eredmény'], EUR)}")
+    if kor_id is not None:
+        r = o.set_index("Kör ID").loc[kor_id]
+        st.markdown(f"**{r['Viszonylat']}** · {r['Reláció']} · {r['Megbízók']} · {r['Vontatmány']} · "
+                    f"{pd.to_datetime(r['Kör kezdete dátum']):%Y.%m.%d.} – {pd.to_datetime(r['Kör vége dátum']):%Y.%m.%d.} "
+                    f"· összehasonlítás: {r['Összehasonlítás']}")
+        d1, d2 = st.columns([2, 3])
+        sorok = [("Km", r["Km"], r["bm Km"], "{:,.0f}"), ("Időtartam (nap)", r["Napok"], r["bm Napok"], "{:,.1f}"),
+                 ("Km / nap", r["Km / nap"], r["bm Km / nap"], "{:,.0f}"),
+                 ("Rakott km %", r["Rakott km %"], r["bm Rakott km %"], "{:,.1f}"),
+                 ("Fogyasztás l/100km", r["Tankolás l/100km"], r["bm Tankolás l/100km"], "{:,.1f}"),
+                 ("Díj €/km", r["Bevétel / km"], r["bm Bevétel / km"], "{:,.3f}")]
+        for c, nev in kd.OK_KTG:
+            sorok.append((f"{nev} €/km", r[c] / r["Km"], r[f"bm {c} / km"], "{:,.3f}"))
+        sorok.append(("Eredmény €/km", r["Eredmény / km"], r["bm Eredmény / km"], "{:,.3f}"))
+        d1.dataframe(pd.DataFrame([{"Mutató": m, "Ez a kör": fmt(a, f), "Átlag": fmt(b_, f),
+                                    "Eltérés": fmt(a - b_, f) if pd.notna(a) and pd.notna(b_) else "–"}
+                                   for m, a, b_, f in sorok]), hide_index=True, width="stretch", height=460)
+        wf = go.Figure(go.Waterfall(
+            x=["Átlagos eredmény"] + [c.replace("Hatás: ", "") for c in hat_cols] + ["Ez a kör"],
+            measure=["absolute"] + ["relative"] * len(hat_cols) + ["total"],
+            y=[r["bm Eredmény / km"] * r["Km"]] + [r[c] for c in hat_cols] + [0],
+            text=[fmt(v, EUR) for v in [r["bm Eredmény / km"] * r["Km"]] + [r[c] for c in hat_cols] + [r["Eredmény"]]],
+            increasing=dict(marker_color="#7E93C9"), decreasing=dict(marker_color="#B54708"),
+            totals=dict(marker_color=NAVY), connector=dict(line=dict(color="#C9D0DF"))))
+        wf.update_layout(title="Mitől lett ennyi az eredmény? (EUR, átlagos kör ugyanennyi km-re vetítve)",
+                         showlegend=False)
+        d2.plotly_chart(style_fig(wf, 460), width="stretch")
+
 # --------------------------------------------------------------------------- Viszonylatok
 with t_visz:
-    b = kd.besorol(p, alap=alap, min_kor=int(min_kor))
-    st.markdown(f'<div class="note"><strong>{len(b)} visszatérő viszonylat</strong> (régiópár: kifelé lerakó → '
-                f'befelé felrakó, legalább {int(min_kor)} kör). Besorolás alapja: <strong>{alap}</strong>, '
+    b = kd.besorol(p, alap=alap, min_kor=int(min_kor), elvart=elvart)
+    st.markdown(f'<div class="note"><strong>{len(b)} visszatérő viszonylat</strong> ({szint.lower()}, '
+                f'legalább {int(min_kor)} kör). Besorolás alapja: <strong>{alap}</strong>, '
                 f'a negatív körök aránya szerint.</div>', unsafe_allow_html=True)
     kc = st.columns(5)
     for i, kat in enumerate(kd.KATEGORIAK):
@@ -244,12 +371,16 @@ with t_visz:
     kat_szuro = st.multiselect("Kategória", kd.KATEGORIAK, default=kd.KATEGORIAK)
     bt = b[b["Kategória"].isin(kat_szuro)]
     cols = ["Viszonylat", "Kategória", "Körök", "Hónapok", "Negatív körök %", "Fedezet negatív %",
-            "Bevétel / km", "Futással arányos ktg / km", "Fix ktg / km", "Fedezet / km", "Eredmény / km",
-            "Eredmény (szcenárió) / km", "Eredmény", "Javaslat"]
+            "Bevétel / km", "Árbevétel-arányos eredmény %", "Nullszaldós díj / km", "Szükséges díj / km",
+            "Hiányzó díj / km", "Szükséges díjemelés %", "Szükséges díj / km (szcenárió)", "Futással arányos ktg / km", "Fix ktg / km", "Fedezet / km",
+            "Eredmény / km", "Eredmény (szcenárió) / km", "Eredmény", "Javaslat"]
     st.dataframe(bt[cols], hide_index=True, width="stretch", height=460, column_config={
         **{c: st.column_config.NumberColumn(format="%.3f") for c in cols if c.endswith("/ km")},
         "Negatív körök %": st.column_config.ProgressColumn(format="%.0f%%", min_value=0, max_value=100),
         "Fedezet negatív %": st.column_config.NumberColumn(format="%.0f%%"),
+        "Bevétel / km": st.column_config.NumberColumn("Díj / km", format="%.3f"),
+        "Szükséges díjemelés %": st.column_config.NumberColumn(format="%.1f%%"),
+        "Árbevétel-arányos eredmény %": st.column_config.NumberColumn("Eredmény %", format="%.1f%%"),
         "Eredmény": st.column_config.NumberColumn(format="%.0f €")})
 
     vis = st.selectbox("Viszonylat körei", b["Viszonylat"], index=None, placeholder="Válassz viszonylatot…")
@@ -289,7 +420,9 @@ with t_szc:
                        "szabadsag_nap": "Szabadság (nap)", "tappenz_nap": "Táppénz (nap)"})
     if st.button("Szcenárió újraszámítása", type="primary"):
         st.session_state["cel"] = dict(zip(szerk["honap"], szerk["cel_sofor"]))
-        st.session_state["flotta"] = szerk.drop(columns=["cel_sofor"]).reset_index(drop=True)
+        modositott = szerk.drop(columns=["cel_sofor"]).set_index("honap")
+        st.session_state["flotta"] = modositott.combine_first(flotta.set_index("honap")).reset_index()
+        st.session_state["flotta_forras"] = st.session_state.get("flotta_forras", "") + " · kézzel módosítva"
         st.rerun()
 
     h = kd.osszesit(p, ["Hónap"])
@@ -304,9 +437,55 @@ with t_szc:
     st.caption("Korlát: a teljesen álló autók fix költsége nem szerepel a körfuvar-fájlokban, így a tényleges "
                "fix költségteher ennél nagyobb lehet. Ehhez járművenkénti havi fix költség kell.")
 
+# --------------------------------------------------------------------------- Létszám
+with t_lsz:
+    st.caption(f"Forrás: {st.session_state.get('flotta_forras', '–')}")
+    if not len(flotta) or "nemz_gkv" not in flotta:
+        st.info("Nincs létszámadat.")
+    else:
+        fl = flotta.sort_values("honap").copy()
+        fl["Hiányzó sofőr"] = (fl["nemz_gjmu"] - fl["nemz_gkv"]).clip(lower=0)
+        fl["Lefedettség %"] = fl["nemz_gkv"] / fl["nemz_gjmu"] * 100
+        u = fl.iloc[-1]
+        lk = st.columns(4)
+        kpi(lk[0], f"Nemzetközi sofőr · {u['honap']}", fmt(u["nemz_gkv"], "{:,.1f}"),
+            f"{fmt(u['nemz_gjmu'], '{:,.0f}')} autóra", dark=True)
+        kpi(lk[1], "Hiányzó sofőr", fmt(u["Hiányzó sofőr"], "{:,.1f}"), f"lefedettség {fmt(u['Lefedettség %'], '{:,.1f}')}%")
+        kpi(lk[2], "Átlag hiány az időszakban", fmt(fl["Hiányzó sofőr"].mean(), "{:,.1f}"),
+            f"{fl['honap'].iloc[0]} – {fl['honap'].iloc[-1]}")
+        if "km_per_ledolg_nap" in fl:
+            kpi(lk[3], "Km / ledolgozott nap", fmt(u.get("km_per_ledolg_nap"), "{:,.0f}"), "utolsó hónap")
+        st.write("")
+        l1, l2 = st.columns(2)
+        fig = go.Figure()
+        fig.add_bar(x=fl["honap"], y=fl["Hiányzó sofőr"], name="Hiányzó sofőr", marker_color="#F5A35C",
+                    text=[fmt(v, "{:.1f}") for v in fl["Hiányzó sofőr"]], textposition="outside")
+        fig.add_scatter(x=fl["honap"], y=fl["nemz_gjmu"], name="Nemzetközi autó", mode="lines",
+                        line=dict(color="#9CA3AF", dash="dash", width=2))
+        fig.add_scatter(x=fl["honap"], y=fl["nemz_gkv"], name="Nemzetközi sofőr", mode="lines+markers",
+                        line=dict(color=NAVY, width=3))
+        fig.update_layout(title="Autók és sofőrök havonta",
+                          yaxis=dict(title="fő / db", rangemode="tozero"))
+        fig.update_xaxes(type="category")
+        l1.plotly_chart(style_fig(fig, 380), width="stretch")
+        if {"szabadsag_nap", "tappenz_nap"} <= set(fl.columns):
+            fig2 = go.Figure()
+            fig2.add_bar(x=fl["honap"], y=fl["szabadsag_nap"], name="Szabadság (nap)", marker_color="#7E93C9")
+            fig2.add_bar(x=fl["honap"], y=fl["tappenz_nap"], name="Táppénz (nap)", marker_color="#B54708")
+            fig2.update_layout(barmode="stack", title="Távollét havonta (nap)")
+            fig2.update_xaxes(type="category")
+            l2.plotly_chart(style_fig(fig2, 380), width="stretch")
+        st.dataframe(fl, hide_index=True, width="stretch", column_config={
+            "honap": "Hónap", "nemz_gjmu": "Nemz. autó", "belf_gjmu": "Belf. autó", "nemz_gkv": "Nemz. sofőr",
+            "belf_gkv": "Belf. sofőr", "atl_ledolg_nap": "Átl. ledolg. nap", "km_per_ledolg_nap": "Km / ledolg. nap",
+            "szabadsag_nap": "Szabadság", "tappenz_nap": "Táppénz", "havi_nemz_km": "Havi nemz. km",
+            "nemz_futas_per_gkv": "Nemz. km / sofőr", "fajl_arbevetel_eur_km": "Árbevétel €/km (könyvelés)",
+            "Lefedettség %": st.column_config.NumberColumn(format="%.1f%%"),
+            "Hiányzó sofőr": st.column_config.NumberColumn(format="%.1f")})
+
 # --------------------------------------------------------------------------- Körök
 with t_kor:
-    cols = ["Kör ID", "Hónap", "Viszonylat", "Reláció", "Célország", "Megbízók", "Vontatmány", "Státusz",
+    cols = ["Kör ID", "Hónap", "Viszonylat", "Régiópár", "Reláció", "Célország", "Megbízók", "Vontatmány", "Státusz",
             "Km", "Rakott km %", "Bevétel", "Futással arányos ktg", "Fix ktg", "Fedezet", "Eredmény",
             "Bevétel / km", "Fedezet / km", "Eredmény / km", "Eredmény (szcenárió) / km"]
     keres = st.text_input("Keresés (viszonylat, megbízó, rendszám)", placeholder="pl. DE65, HARTMANN, AEBY409")
@@ -324,9 +503,13 @@ with t_kor:
 
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as xw:
-        kd.besorol(p, alap=alap, min_kor=int(min_kor)).to_excel(xw, sheet_name="Viszonylatok", index=False)
-        kd.osszesit(p, ["Hónap"]).to_excel(xw, sheet_name="Havi összesítő", index=False)
+        kd.besorol(p, alap=alap, min_kor=int(min_kor), elvart=elvart).to_excel(xw, sheet_name="Viszonylatok", index=False)
+        kd.osszesit(p, ["Hónap"], elvart).to_excel(xw, sheet_name="Havi összesítő", index=False)
         kt.to_excel(xw, sheet_name="Körök", index=False)
+        oo = kd.okok(p, min_kor=int(min_kor)).nsmallest(50, "Eredmény")
+        oo[["Kör ID", "Hónap", "Viszonylat", "Reláció", "Megbízók", "Km", "Napok", "Eredmény", "Eredmény / km",
+            "bm Eredmény / km", "Eltérés (EUR)", "Fő okok"] + [c for c in oo.columns if c.startswith("Hatás: ")]] \
+            .to_excel(xw, sheet_name="Legrosszabb körök", index=False)
     st.download_button("Excel letöltése", buf.getvalue(), "korfuvar_elemzes.xlsx",
                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
