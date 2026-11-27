@@ -428,18 +428,29 @@ def trend(df: pd.DataFrame) -> pd.DataFrame:
     return osszesit(df, ["Viszonylat", "Hónap"])
 
 
-def vallalkozoi(b: pd.DataFrame, ar_km: float, fix_marad: bool = True) -> pd.DataFrame:
-    """Kiadás alvállalkozónak vs. saját futás viszonylatonként.
+def vallalkozoi(b: pd.DataFrame, tobblet_kor: float = 50.0, piaci_ar_km: float | None = None) -> pd.DataFrame:
+    """Kiadás alvállalkozónak a szerződéses (kiutalt) fuvaroknál.
 
-    Kiadva: bevétel − alvállalkozói díj. Saját futás: fix_marad esetén a fedezet (a fix költség
-    mindenképp nálunk marad, az autó áll), különben a teljes eredmény (az autó máshol hasznosítható).
+    Feltevés: több az export, mint az import, így a felszabaduló saját autót másik fuvar váltja ki;
+    a fix költség tehát nem marad parlagon. A cél, hogy minden fuvar pluszos legyen: kiadva legalább
+    `tobblet_kor` EUR többlet maradjon körönként.
+    Max. alvállalkozói díj/kör = átlagos fuvardíj/kör − elvárt többlet.
+    Kiadás javasolt: a mindig / többnyire negatív viszonylatoknál.
     """
     o = b.copy()
-    o["Alvállalkozói díj / km"] = ar_km
-    o["Kiadva eredmény / km"] = o["Bevétel / km"] - ar_km
-    o["Saját futás / km"] = o["Fedezet / km"] if fix_marad else o["Eredmény / km"]
-    o["Kiadás előnye / km"] = o["Kiadva eredmény / km"] - o["Saját futás / km"]
-    o["Kiadás előnye (EUR)"] = o["Kiadás előnye / km"] * o["Km"]
-    o["Max. alvállalkozói díj / km"] = o["Futással arányos ktg / km"] if fix_marad else o["Nullszaldós díj / km"]
-    o["Döntés"] = np.where(o["Kiadás előnye / km"] > 0, "Kiadni megéri", "Saját autóval jobb")
-    return o.sort_values("Kiadás előnye / km", ascending=False)
+    o["Km / kör"] = o["Km"] / o["Körök"]
+    o["Díj / kör"] = o["Bevétel"] / o["Körök"]
+    o["Saját eredmény / kör"] = o["Eredmény"] / o["Körök"]
+    o["Elvárt többlet / kör"] = tobblet_kor
+    o["Max. alvállalkozói díj / kör"] = o["Díj / kör"] - tobblet_kor
+    o["Max. alvállalkozói díj / km"] = o["Max. alvállalkozói díj / kör"] / o["Km / kör"]
+    o["Javulás kiadással / kör"] = tobblet_kor - o["Saját eredmény / kör"]
+    o["Javulás kiadással (EUR)"] = o["Javulás kiadással / kör"] * o["Körök"]
+    neg = o["Kategória"].isin(KATEGORIAK[:2])
+    o["Javaslat"] = np.where(neg, "Kiadni", np.where(o["Kategória"] == KATEGORIAK[2], "Figyelni", "Megtartani"))
+    if piaci_ar_km:
+        o["Piaci alv. díj / kör"] = piaci_ar_km * o["Km / kör"]
+        o["Kiadva többlet / kör"] = o["Díj / kör"] - o["Piaci alv. díj / kör"]
+        o["Piaci díjjal teljesül?"] = np.where(o["Kiadva többlet / kör"] >= tobblet_kor, "igen", "nem")
+    rend = {"Kiadni": 0, "Figyelni": 1, "Megtartani": 2}
+    return o.sort_values(["Javaslat", "Saját eredmény / kör"], key=lambda c: c.map(rend) if c.name == "Javaslat" else c)

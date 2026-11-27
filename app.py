@@ -510,36 +510,43 @@ with t_part:
 
 # --------------------------------------------------------------------------- Vállalkozói összevetés
 with t_vall:
-    v1, v2 = st.columns([1, 2])
-    ar = v1.number_input("Alvállalkozói díj (EUR/km)", 0.50, 3.00, 1.10, 0.01, format="%.2f")
-    fix_marad = v2.radio("Ha kiadjuk, az autó…", ["áll, a fix költség nálunk marad",
-                                                 "máshol hasznosítható (a fix költség nem ezt terheli)"],
-                         horizontal=False) .startswith("áll")
-    st.markdown('<div class="note">Kiadva a kör eredménye: <strong>díj − alvállalkozói díj</strong>. Saját futásnál '
-                + ("a <strong>fedezet</strong> (díj − futással arányos költség), mert a fix költség mindenképp felmerül. "
-                   "Kiadni akkor éri meg, ha az alvállalkozói díj a futással arányos költség/km alatt van."
-                   if fix_marad else
-                   "a <strong>teljes eredmény</strong>, mert az autó máshol termel. Kiadni akkor éri meg, ha az "
-                   "alvállalkozói díj a teljes költség/km (nullszaldós díj) alatt van.")
-                + '</div>', unsafe_allow_html=True)
-    bv = kd.vallalkozoi(kd.besorol(p, alap=alap, min_kor=int(min_kor), elvart=elvart), ar, fix_marad)
+    st.markdown('<div class="note">A szerződéses, kiutalt fuvarokat el kell vállalni. Mivel több az export, mint az '
+                'import, a felszabaduló saját autót másik fuvar váltja ki, így a fix költség nem marad parlagon. '
+                'Ezért a <strong>mindig vagy többnyire negatív</strong> viszonylatokat érdemes alvállalkozónak kiadni, '
+                'akkor is, ha csak kis többlet marad rajtuk: a cél, hogy minden fuvar pluszos legyen. '
+                '<strong>Max. alvállalkozói díj = átlagos fuvardíj − elvárt többlet</strong> (körönként).</div>',
+                unsafe_allow_html=True)
+    v1, v2 = st.columns(2)
+    tobblet = v1.number_input("Elvárt többlet kiadásnál (EUR / kör)", 0, 1000, 50, 10)
+    piaci = v2.number_input("Ismert piaci alvállalkozói díj (EUR/km, 0 = nincs)", 0.0, 3.0, 0.0, 0.01, format="%.2f",
+                            help="Ha megadod, megmutatja, hogy ezen a díjon teljesül-e az elvárt többlet.")
+    bv = kd.vallalkozoi(kd.besorol(p, alap=alap, min_kor=int(min_kor), elvart=elvart), float(tobblet),
+                        piaci or None)
+    ki = bv[bv["Javaslat"] == "Kiadni"]
     vk = st.columns(3)
-    jo = bv[bv["Döntés"] == "Kiadni megéri"]
-    kpi(vk[0], "Kiadni megéri", f"{len(jo)} viszonylat", f"{int(jo['Körök'].sum())} kör", dark=True)
-    kpi(vk[1], "Becsült előny, ha ezeket kiadjuk", fmt(jo["Kiadás előnye (EUR)"].sum(), EUR), "a vizsgált időszakban")
-    kpi(vk[2], "Saját autóval jobb", f"{len(bv) - len(jo)} viszonylat")
+    kpi(vk[0], "Kiadásra javasolt", f"{len(ki)} viszonylat", f"{int(ki['Körök'].sum())} kör", dark=True)
+    kpi(vk[1], "Saját eredményük most", fmt(ki["Eredmény"].sum(), EUR), "a vizsgált időszakban")
+    kpi(vk[2], "Javulás, ha az elvárt többlettel kiadjuk", fmt(ki["Javulás kiadással (EUR)"].sum(), EUR),
+        f"{fmt(tobblet, '{:,.0f}')} € többlet × {int(ki['Körök'].sum())} kör, a saját veszteség helyett")
     st.write("")
-    vcol = ["Viszonylat", "Döntés", "Kategória", "Körök", "Bevétel / km", "Futással arányos ktg / km",
-            "Fix ktg / km", "Saját futás / km", "Kiadva eredmény / km", "Kiadás előnye / km", "Kiadás előnye (EUR)",
-            "Max. alvállalkozói díj / km"]
-    st.dataframe(bv[vcol], hide_index=True, width="stretch", height=520, column_config={
-        **{c: st.column_config.NumberColumn(format="%.3f") for c in vcol if c.endswith("/ km")},
+    vcol = ["Viszonylat", "Javaslat", "Kategória", "Körök", "Km / kör", "Díj / kör", "Saját eredmény / kör",
+            "Max. alvállalkozói díj / kör", "Max. alvállalkozói díj / km", "Bevétel / km", "Javulás kiadással / kör",
+            "Javulás kiadással (EUR)"]
+    if piaci:
+        vcol += ["Piaci alv. díj / kör", "Kiadva többlet / kör", "Piaci díjjal teljesül?"]
+    st.dataframe(bv[vcol], hide_index=True, width="stretch", height=560, column_config={
+        "Km / kör": st.column_config.NumberColumn(format="%.0f"),
+        "Díj / kör": st.column_config.NumberColumn("Átl. díj / kör", format="%.0f €"),
+        "Saját eredmény / kör": st.column_config.NumberColumn("Saját eredmény / kör", format="%.0f €"),
+        "Max. alvállalkozói díj / kör": st.column_config.NumberColumn(
+            format="%.0f €", help="Átlagos fuvardíj − elvárt többlet: legfeljebb ennyit fizethetünk az alvállalkozónak"),
+        "Max. alvállalkozói díj / km": st.column_config.NumberColumn(format="%.3f"),
         "Bevétel / km": st.column_config.NumberColumn("Díj / km", format="%.3f"),
-        "Saját futás / km": st.column_config.NumberColumn(format="%.3f",
-                                                          help="Fedezet/km vagy eredmény/km a választástól függően"),
-        "Max. alvállalkozói díj / km": st.column_config.NumberColumn(
-            format="%.3f", help="Ennél olcsóbb alvállalkozói díjnál éri meg kiadni"),
-        "Kiadás előnye (EUR)": st.column_config.NumberColumn(format="%.0f €")})
+        "Javulás kiadással / kör": st.column_config.NumberColumn(format="%.0f €",
+                                                                 help="Elvárt többlet − saját eredmény / kör"),
+        "Javulás kiadással (EUR)": st.column_config.NumberColumn(format="%.0f €"),
+        "Piaci alv. díj / kör": st.column_config.NumberColumn(format="%.0f €"),
+        "Kiadva többlet / kör": st.column_config.NumberColumn(format="%.0f €")})
 
 # --------------------------------------------------------------------------- Szcenárió
 with t_szc:

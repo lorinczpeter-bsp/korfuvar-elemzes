@@ -52,5 +52,4 @@ Hozzáférés, két lehetőség közül:
 - **Viszonylatok**: besorolás (nap/kör, km/nap, üres km % is), havi trend viszonylatonként, import-párosítás
   (egy exportcélhoz melyik visszfuvar hozza a legjobb kört).
 - **Partnerek**: megrendelőnként az érintett körök eredménye (egy kör több partnernél is szerepelhet).
-- **Vállalkozói összevetés**: megadható alvállalkozói €/km díj mellett hol érné meg kiadni; ha az autó áll,
-  a fix költség nálunk marad, így csak a futással arányos költség alatti díj éri meg.
+- **Vállalkozói összevetés**: a mindig/többnyire negatív viszonylatok kiadása; max. alvállalkozói díj = átlagos díj/kör − elvárt többlet (alap 50 €/kör). A felszabaduló autót másik export váltja ki.
