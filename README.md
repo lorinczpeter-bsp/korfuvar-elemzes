@@ -18,23 +18,20 @@ tehetők; ezeket a `.gitignore` kizárja a repóból.
 
 Az app automatikusan beolvassa a havi autó- és sofőrlétszámot az „Éves fajlagos fuvarozási mutatók”
 Google-táblázat éves munkalapjaiból (pl. `2026`). Ha nem érhető el, figyelmeztet, és tartalékként a feltöltött
-CSV-t vagy a Szcenárió fülön kézzel beírt értékeket használja. Streamlit Cloudon az app **Settings → Secrets**
-részébe (a repóba soha):
+CSV-t vagy a Szcenárió fülön kézzel beírt értékeket használja. Beállítás a Streamlit Cloudon,
+az app **Settings → Secrets** részében (a repóba soha):
 
 ```toml
 flotta_sheet_url = "https://docs.google.com/spreadsheets/d/…/edit"
-
-[google_service_account]
-type = "service_account"
-project_id = "…"
-private_key_id = "…"
-private_key = "-----BEGIN PRIVATE KEY-----\n…\n-----END PRIVATE KEY-----\n"
-client_email = "…@….iam.gserviceaccount.com"
-client_id = "…"
-token_uri = "https://oauth2.googleapis.com/token"
 ```
 
-A táblázatot oszd meg olvasásra a szolgáltatásfiók `client_email` címével.
+Hozzáférés, két lehetőség közül:
+
+1. **Szolgáltatásfiókkal (javasolt, a táblázat privát marad):** ugyanaz a `[gcp_service_account]` blokk,
+   amely a jutalék-app Secrets részében van (Drive API elég), és a táblázatot meg kell osztani olvasásra
+   a szolgáltatásfiók `client_email` címével.
+2. **Link-megosztással:** a táblázat megosztása „Bárki, akinek megvan a link – Megtekintő”. Ilyenkor
+   szolgáltatásfiók nem kell, de a link birtokában bárki olvashatja.
 
 ## Mit számol
 

@@ -174,7 +174,7 @@ if flotta is None:
     evek = tuple(sorted({int(h[:4]) for h in raw["Hónap"].dropna().astype(str) if h[:4].isdigit()}))
     if sheet_url:
         try:
-            creds = secret("google_service_account")
+            creds = secret("gcp_service_account") or secret("google_service_account")
             flotta = flotta_google(sheet_url, evek, tuple(dict(creds).items()) if creds else None)
             st.session_state["flotta_forras"] = (
                 f"Google-táblázat ({', '.join(map(str, evek))}), lekérve: {pd.Timestamp.now(tz='Europe/Budapest'):%Y.%m.%d. %H:%M}")

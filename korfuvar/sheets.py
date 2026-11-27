@@ -1,13 +1,12 @@
 """Havi autó- és sofőrlétszám beolvasása az "Éves fajlagos fuvarozási mutatók" Google-táblázatból.
 
 Hozzáférés (a transporeon-inno apphoz hasonlóan):
-- Streamlit secrets `google_service_account` (szolgáltatásfiók JSON mezői) -> Sheets API, csak olvasás;
-- ennek hiányában a nyilvános gviz CSV-export (csak ha a táblázat link-megosztással olvasható).
+- Streamlit secrets `gcp_service_account` (mint a jutalék-appban) -> Drive API xlsx-export, csak olvasás;
+- ennek hiányában a nyilvános xlsx-export (csak ha a táblázat link-megosztással olvasható).
 A táblázat azonosítója a secrets `flotta_sheet_url` kulcsában van (a repó publikus).
 """
 from __future__ import annotations
 
-import csv
 import io
 import re
 
@@ -50,33 +49,56 @@ def _szam(v):
         return None
 
 
-def fetch_values(url_or_id: str, munkalap: str, credentials=None) -> list[list]:
+def fetch_xlsx(url_or_id: str, credentials=None) -> bytes:
+    """A teljes táblázat xlsx-ként.
+
+    credentials megadva: Google Drive API export szolgáltatásfiókkal (a táblázatot meg kell osztani
+    olvasásra a szolgáltatásfiók client_email címével; elég a Drive API, külön Sheets API nem kell).
+    credentials nélkül: nyilvános export-link (csak „bárki, akinek megvan a link” megosztásnál működik).
+    """
     sid = sheet_id(url_or_id)
     if credentials:
         from google.auth.transport.requests import Request
         from google.oauth2.service_account import Credentials
         auth = Credentials.from_service_account_info(
-            dict(credentials), scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"])
+            dict(credentials), scopes=["https://www.googleapis.com/auth/drive.readonly"])
         auth.refresh(Request())
-        r = requests.get(f"https://sheets.googleapis.com/v4/spreadsheets/{sid}/values/'{munkalap}'!A1:AD60",
-                         params={"valueRenderOption": "UNFORMATTED_VALUE"},
-                         headers={"Authorization": f"Bearer {auth.token}"}, timeout=30)
+        r = requests.get(f"https://www.googleapis.com/drive/v3/files/{sid}/export",
+                         params={"mimeType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                 "supportsAllDrives": "true"},
+                         headers={"Authorization": f"Bearer {auth.token}"}, timeout=60)
+        if r.status_code in (403, 404):
+            raise PermissionError(f"A szolgáltatásfiók nem látja a táblázatot (HTTP {r.status_code}). "
+                                  "Oszd meg vele olvasásra a client_email címén.")
         r.raise_for_status()
-        return r.json().get("values", [])
-    r = requests.get(f"https://docs.google.com/spreadsheets/d/{sid}/gviz/tq",
-                     params={"tqx": "out:csv", "sheet": munkalap}, timeout=30)
+        return r.content
+    r = requests.get(f"https://docs.google.com/spreadsheets/d/{sid}/export", params={"format": "xlsx"}, timeout=60)
     r.raise_for_status()
-    if "<html" in r.text[:1000].lower() or "accounts.google.com" in r.url:
-        raise PermissionError("A Google-táblázat bejelentkezést kér (nincs nyilvános olvasási jog).")
-    return list(csv.reader(io.StringIO(r.content.decode("utf-8-sig"))))
+    if r.content[:2] != b"PK":
+        raise PermissionError("A Google-táblázat bejelentkezést kér (nincs nyilvános olvasási jog, "
+                              "és nincs beállítva szolgáltatásfiók).")
+    return r.content
+
+
+def fetch_values(url_or_id: str, munkalap: str, credentials=None, xlsx: bytes | None = None) -> list[list]:
+    import openpyxl
+    xlsx = xlsx or fetch_xlsx(url_or_id, credentials)
+    wb = openpyxl.load_workbook(io.BytesIO(xlsx), read_only=True, data_only=True)
+    if munkalap not in wb.sheetnames:
+        raise ValueError(f"Nincs „{munkalap}” munkalap a táblázatban.")
+    return [list(r) for r in wb[munkalap].iter_rows(max_row=80, values_only=True)]
 
 
 def parse_ev(values: list[list], ev: int) -> pd.DataFrame:
     """Egy éves munkalap -> havi sorok (honap, nemz_gjmu, nemz_gkv, …)."""
     if not values:
         raise ValueError(f"A(z) {ev} munkalap üres.")
-    fejlec = [str(c).strip() for c in values[0]]
-    honap_oszlop = {i: int(c) for i, c in enumerate(fejlec) if re.fullmatch(r"\d{1,2}", c) and 1 <= int(c) <= 12}
+    def _ho(c):
+        if isinstance(c, (int, float)) and float(c).is_integer() and 1 <= int(c) <= 12:
+            return int(c)
+        t = str(c).strip() if c is not None else ""
+        return int(t) if re.fullmatch(r"\d{1,2}", t) and 1 <= int(t) <= 12 else None
+    honap_oszlop = {i: _ho(c) for i, c in enumerate(values[0]) if _ho(c)}
     if not honap_oszlop:
         raise ValueError(f"A(z) {ev} munkalapon nem találom a hónap-oszlopokat (01–12).")
     adat: dict[int, dict] = {h: {"honap": f"{ev}-{h:02d}"} for h in honap_oszlop.values()}
@@ -84,7 +106,7 @@ def parse_ev(values: list[list], ev: int) -> pd.DataFrame:
     for sor in values[1:]:
         if not sor:
             continue
-        nev = SOROK.get(str(sor[0]).strip())
+        nev = SOROK.get(str(sor[0]).strip()) if sor[0] is not None else None
         if not nev:
             continue
         talalt.add(nev)
@@ -97,5 +119,6 @@ def parse_ev(values: list[list], ev: int) -> pd.DataFrame:
 
 
 def load_flotta_google(url_or_id: str, evek: list[int], credentials=None) -> pd.DataFrame:
-    return pd.concat([parse_ev(fetch_values(url_or_id, str(ev), credentials), ev) for ev in sorted(set(evek))],
+    xlsx = fetch_xlsx(url_or_id, credentials)
+    return pd.concat([parse_ev(fetch_values(url_or_id, str(ev), xlsx=xlsx), ev) for ev in sorted(set(evek))],
                      ignore_index=True)
